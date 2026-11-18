@@ -60,7 +60,7 @@ def update_risk_config(body: RiskConfigUpdate, user: str = Depends(auth.require_
     """Update risk thresholds (admin only)."""
     if not (body.low < body.medium < body.high <= body.critical):
         raise control.ValidationProblem("Thresholds must be strictly ascending: 0 < low < medium < high <= critical")
-    
+
     def mutate(state: dict) -> None:
         state["risk_thresholds"] = {
             "low": body.low,

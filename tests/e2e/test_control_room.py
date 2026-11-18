@@ -35,6 +35,24 @@ def test_control_room_requires_login(page):
     assert "/login" in page.url
 
 
+def test_admin_light_theme_and_responsive_navigation(page, admin_page):
+    page.goto(f"{BASE}/admin")
+    page.wait_for_selector("#admin-tab-content .panel")
+    assert page.locator("body").evaluate("(el) => getComputedStyle(el).backgroundColor") == "rgb(245, 246, 247)"
+    assert page.locator(".admin-sidebar").evaluate("(el) => getComputedStyle(el).backgroundColor") == "rgb(255, 255, 255)"
+    page.set_viewport_size({"width": 390, "height": 844})
+    for module in ("overview", "control", "datasources", "scenarios", "risks", "layers", "appearance", "system"):
+        page.click(f'.admin-nav-item[data-module="{module}"]')
+        expect(page.locator("#admin-tab-content .panel").first).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.click('.admin-nav-item[data-module="scenarios"]')
+    page.click("#btn-create-scenario")
+    expect(page.locator(".admin-modal h3")).to_contain_text("Create Simulation Scenario")
+    assert page.locator(".admin-modal").evaluate("(el) => getComputedStyle(el).backgroundColor") == "rgb(255, 255, 255)"
+    page.click(".admin-modal .modal-close-btn")
+    expect(page.locator(".admin-modal")).to_have_count(0)
+
+
 def test_all_nine_tabs_exist_and_render_their_own_content(page, admin_page):
     labels = page.locator(".cr-tab").all_inner_texts()
     assert [t.strip() for t in labels] == TABS

@@ -14,7 +14,7 @@ The goal is simple: every visible control must have a clear action, a clear back
 
 | **Area**             | **Visible Elements**                                                                                   | **Primary Purpose**                          |
 |----------------------|--------------------------------------------------------------------------------------------------------|----------------------------------------------|
-| Left navigation      | Overview, Map, Simulation, Municipalities, Data Sources, Insights, Reports, Settings                   | Navigate between Digital Twin functions.     |
+| Left navigation      | Overview, Municipalities, Data Sources, Reports, Settings                                             | Navigate between Digital Twin functions.     |
 | Header               | System Online, Last update, location, Current/Simulation toggle, user icon                             | System status and global mode.               |
 | Source cards         | SMHI, Trafikverket, SCB, SGU, Skogsstyrelsen, Lantmäteriet                                             | Quick live/source status and summary.        |
 | Map area             | Risk selector, zoom, layers, Dalarna map                                                               | Geographic situation and risk visualization. |
@@ -60,13 +60,12 @@ The goal is simple: every visible control must have a clear action, a clear back
 | **Navigation Button** | **Action**                         | **What Opens / Changes**                                                                            | **URL/State Recommendation** |
 |-----------------------|------------------------------------|-----------------------------------------------------------------------------------------------------|------------------------------|
 | Overview              | Open main regional dashboard.      | Return to the supplied dashboard overview.                                                          | / or /overview               |
-| Map                   | Open geographic map workspace.     | Show larger map, layers and geographic analysis.                                                    | /map                         |
-| Simulation            | Open dedicated scenario workspace. | Show scenario creation, execution and detailed results.                                             | /simulation                  |
-| Municipalities        | Open municipality analysis.        | Show all 15 municipalities, comparison and details.                                                 | /municipalities              |
+| Municipalities        | Open municipality results.         | Show the current or simulated municipality table, filters and exports.                              | /municipalities              |
 | Data Sources          | Open source monitoring page.       | Show six source connections, health, metadata and latest updates.                                   | /data-sources                |
-| Insights              | Open analytical insights.          | Show generated cross-source insights and trends.                                                    | /insights                    |
 | Reports               | Open reports.                      | Show/export simulation and regional reports.                                                        | /reports                     |
 | Settings              | Open user/dashboard settings.      | Show personal and non-destructive interface settings. Admin configuration remains in Admin/Grafana. | /settings                    |
+
+Map, simulation controls and results remain on the Overview. The municipality results table is on the Municipalities page. Source dependency switches are available in the expandable section of the scenario controls. Old links to the other removed dedicated pages fall back to Overview.
 
 # 6. Six Data Source Cards
 
@@ -87,7 +86,7 @@ The Online badge itself is a status indicator. It should not toggle the source. 
 
 | **Control**         | **Action**                    | **Backend / Logic**                            | **Expected Result**                              |
 |---------------------|-------------------------------|------------------------------------------------|--------------------------------------------------|
-| Overall risk ▼      | Select risk layer/category.   | Frontend state or GET configured risk metrics. | Map recolours/updates by selected risk category. |
+| Overall risk ▼      | Select risk layer/category.   | Frontend state or GET configured risk metrics. | Map, risk gauge and takeaway update to the selected category. |
 | Food / Supply risk  | Select category if available. | Use configured risk calculation.               | Municipalities display food/supply risk.         |
 | Snow / Flood risk   | Select category.              | Use configured snow/flood risk.                | Map displays snow/flood risk.                    |
 | Infrastructure risk | Select category.              | Use configured infrastructure risk.            | Map displays infrastructure risk.                |
@@ -114,16 +113,20 @@ This is the main interactive control area in the supplied interface. It should b
 |---------------------------------|-----------------------------------------------------|---------------------------------------------------------------------------------------|
 | Scenario ▼                      | Select scenario.                                    | GET /api/simulation/scenarios; load default parameters.                               |
 | Target year 2026/2030/2035/2040 | Select target year.                                 | Update local scenario state; old result becomes pending if year changes.              |
-| Population change slider        | Set growth/decline.                                 | Update driver state; validate range.                                                  |
-| Population change value         | Optional direct numeric edit.                       | Synchronize slider and numeric value.                                                 |
+| Population (SCB) slider/value   | Set population growth/decline.                       | Update `population_change`; synchronize slider and numeric input.                     |
+| Road (Trafikverket) slider/value| Set road-temperature change.                        | Update `road_temp_delta`; synchronize slider and numeric input.                       |
+| Land (Lantmäteriet) slider/value| Set development / land-use change in %.             | Update `land_development_change`; synchronize slider and numeric input.               |
+| Forest (Skogsstyrelsen) slider/value | Set harvest / change intensity in %.            | Update `forest_harvest_change`; synchronize slider and numeric input.                 |
+| Water (SGU) slider/value        | Set groundwater / water-stress change in %.         | Update `water_stress_change`; synchronize slider and numeric input.                   |
+| Weather (SMHI) slider/value    | Set temperature in °C.                               | Update `temperature_change` together with other drivers.                              |
 | Scope ▼                         | All Dalarna or municipality.                        | Update simulation scope.                                                              |
 | SCB toggle                      | Include/exclude population driver/dependency.       | Update scenario dependency configuration.                                             |
 | Trafikverket toggle             | Include/exclude traffic/infrastructure consequence. | Update dependency configuration.                                                      |
 | Lantmäteriet toggle             | Include/exclude land/development consequence.       | Update dependency configuration.                                                      |
 | Skogsstyrelsen toggle           | Include/exclude forest/environment consequence.     | Update dependency configuration.                                                      |
 | SGU toggle                      | Include/exclude water/geology consequence.          | Update dependency configuration.                                                      |
-| SMHI toggle                     | Include/exclude weather as external condition.      | Update context dependency; do not artificially change weather from population growth. |
-| Run Simulation                  | Execute scenario.                                   | POST /api/simulation/run; update map, results and municipality table.                 |
+| SMHI toggle                     | Include/exclude weather conditions.                 | Update dependency; population alone does not change weather, explicit SMHI inputs do. |
+| Run Combined Simulation         | Execute all edited source inputs together.          | POST /api/simulation/run; update map, results and municipality table.                 |
 | Reset                           | Restore default/last saved inputs.                  | Clear pending result; never delete stored data.                                       |
 | Advanced options ▼              | Expand advanced model parameters.                   | Show coefficients, thresholds, assumptions and model version.                         |
 
@@ -133,7 +136,7 @@ This is the main interactive control area in the supplied interface. It should b
 
 - Select target year.
 
-- Set the driver value, e.g. population +10%.
+- Edit the inputs for any or all six sources; they are submitted in one combined run.
 
 - Select scope.
 
@@ -180,8 +183,8 @@ This is the main interactive control area in the supplied interface. It should b
 
 | **Element**          | **Action**         | **Result**                                           |
 |----------------------|--------------------|------------------------------------------------------|
-| Risk gauge           | Click.             | Open regional risk breakdown.                        |
-| MEDIUM label         | Click.             | Show score, category contributions and threshold.    |
+| Risk gauge           | Click.             | Open the selected risk category's breakdown.         |
+| Risk level label     | Click.             | Show the selected score, contributors and threshold. |
 | Key Takeaway         | Read-only summary. | Show concise explanation of scenario outcome.        |
 | Key Takeaway details | Optional click.    | Show methodology/assumptions behind the explanation. |
 
@@ -342,6 +345,6 @@ For this Main Interface, Preview means the immediate visual response after a use
 
 # 23. Final UX Requirement
 
-Preserve the supplied interface's hierarchy: six source cards → regional map → Simulation Control → Simulation Results → Impact by Source → Municipality Results. Keep the dark, clean, decision-support style. Do not add controls unless they have a clear user purpose.
+Preserve the supplied interface's hierarchy: six source cards → regional map → Simulation Control → Simulation Results → Impact by Source, with Municipality Results on its own page. Use the light, red-accented decision-support theme. Do not add controls unless they have a clear user purpose.
 
 Every interactive element must answer: WHAT does it change, WHERE does it change, and WHAT does the user see afterward? The interface should provide immediate feedback without clutter.

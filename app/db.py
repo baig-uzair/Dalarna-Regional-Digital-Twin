@@ -33,7 +33,11 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
             if now - _last_failed_connect < 10.0:
                 raise psycopg2.OperationalError("Database recently unreachable (retry cooldown)")
             try:
-                _pool = psycopg2.pool.ThreadedConnectionPool(1, 12, **config.db_params())
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    config.db_pool_min_connections(),
+                    config.db_pool_max_connections(),
+                    **config.db_params(),
+                )
             except Exception:
                 _last_failed_connect = now
                 raise

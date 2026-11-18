@@ -203,3 +203,13 @@ def test_scheduler_waits_for_interval_but_retries_errors_sooner(clean):
     assert "smhi" not in due  # 15 min interval, ran 5 min ago
     assert "scb" not in due   # 24 h interval
     assert "sgu" in due       # failed 6 min ago -> retry after 5 min, not after 6 h
+
+
+def test_each_source_has_a_dedicated_adapter():
+    from adapters.registry import get_adapter
+
+    for sid in ("smhi", "trafikverket", "scb", "sgu", "skogsstyrelsen", "lantmateriet"):
+        adapter = get_adapter(sid)
+        assert adapter.source_id == sid
+        assert hasattr(adapter, "fetch_records")
+        assert hasattr(adapter, "test_connection")

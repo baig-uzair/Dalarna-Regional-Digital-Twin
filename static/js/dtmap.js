@@ -5,27 +5,27 @@ import { NEUTRAL_COLOR } from "./shared.js";
 
 const BASE_STYLE = {
   version: 8,
-  sources: {
-    "esri-satellite": {
-      type: "raster",
-      tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
-      tileSize: 256,
-      attribution: "Esri World Imagery",
-    },
-  },
+  sources: {},
   layers: [
     { id: "background-color", type: "background", paint: { "background-color": "#060c16" } },
-    { id: "satellite-layer", type: "raster", source: "esri-satellite", paint: { "raster-opacity": 0.55, "raster-saturation": -0.5 } },
   ],
+};
+
+const SATELLITE_SOURCE = {
+  type: "raster",
+  tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+  tileSize: 256,
+  attribution: "Esri World Imagery",
 };
 
 const DALARNA_BOUNDS = [[12.1, 59.85], [16.85, 62.15]];
 
 export class DalarnaMap {
-  constructor(container, { onMunicipalityClick, onMove } = {}) {
+  constructor(container, { onMunicipalityClick, onMove, light = false } = {}) {
     this.container = container;
     this.onMunicipalityClick = onMunicipalityClick;
     this.onMove = onMove;
+    this.light = light;
     this.markers = [];
     this.overlays = new Set();
     this.ready = this._init();
@@ -44,6 +44,13 @@ export class DalarnaMap {
       attributionControl: false,
     });
     await new Promise((resolve) => this.map.on("load", resolve));
+
+    if (this.light) {
+      this.map.setPaintProperty("background-color", "background-color", "#eef1f2");
+    } else {
+      this.map.addSource("esri-satellite", SATELLITE_SOURCE);
+      this.map.addLayer({ id: "satellite-layer", type: "raster", source: "esri-satellite", paint: { "raster-opacity": 0.55, "raster-saturation": -0.5 } });
+    }
 
     this.map.addSource("muni", { type: "geojson", data: this.geo, promoteId: "code" });
     this.map.addLayer({

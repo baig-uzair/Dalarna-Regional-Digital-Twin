@@ -4,14 +4,15 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 from typing import Any, Optional
 
 import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from app import auth, control, db
-from simulation.engine import get_latest_simulation, run_simulation, set_latest_simulation
+from simulation.engine import ScenarioInputError, get_latest_simulation, run_simulation, set_latest_simulation
 
 logger = logging.getLogger("app.simulation")
 
@@ -23,10 +24,34 @@ _LATEST_OFFICIAL: Optional[dict[str, Any]] = None
 
 class RunSimulationRequest(BaseModel):
     scenario: str = Field(default="population_growth")
+    scenario_name: Optional[str] = Field(default=None, max_length=100)
     target_year: int = Field(default=2030, ge=2020, le=2100)
     scope: str = Field(default="dalarna")
     driver: Optional[dict[str, Any]] = Field(default_factory=lambda: {"population_change": 0.10})
     excluded_sources: Optional[list[str]] = Field(default_factory=list)
+    initial_driver: Optional[dict[str, Any]] = None
+    initial_excluded_sources: Optional[list[str]] = None
+
+    @field_validator("driver", "initial_driver")
+    @classmethod
+    def validate_driver(cls, driver, info: ValidationInfo):
+        bounds = {
+            "population_change": (-0.20, 0.30),
+            "road_temp_delta": (-20, 20),
+            "freeze_cycles": (0, 40),
+            "land_development_change": (-1, 1),
+            "forest_harvest_change": (-1, 2),
+            "water_stress_change": (-1, 2),
+            "temperature_change": (-15, 15),
+            "precipitation_change_pct": (-1, 3),
+        }
+        for key, value in (driver or {}).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{info.field_name}.{key} must be a finite number")
+            if key in bounds and not bounds[key][0] <= value <= bounds[key][1]:
+                low, high = bounds[key]
+                raise ValueError(f"{info.field_name}.{key} must be between {low} and {high}")
+        return driver
 
 
 class ScenarioModel(BaseModel):
@@ -50,15 +75,48 @@ class ScenarioUpdateModel(BaseModel):
     description: Optional[str] = None
 
 
+_BASE_SCENARIO_DRIVER = {
+    "population_change": 0.0,
+    "road_temp_delta": 0.0,
+    "freeze_cycles": 0,
+    "land_development_change": 0.0,
+    "forest_harvest_change": 0.0,
+    "water_stress_change": 0.0,
+    "temperature_change": 0.0,
+    "precipitation_change_pct": 0.0,
+}
+
+
+def _scenario_driver(**values: int | float) -> dict[str, int | float]:
+    return {**_BASE_SCENARIO_DRIVER, **values}
+
+
 DEFAULT_SCENARIOS = [
+    {
+        "id": "combined_baseline",
+        "name": "Combined Regional Baseline (2030)",
+        "driver_source": "Multiple",
+        "target_year": 2030,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.10,
+            road_temp_delta=2.0,
+            land_development_change=0.15,
+            forest_harvest_change=0.20,
+            water_stress_change=-0.15,
+            temperature_change=2.0,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "Fixed six-source starting point for regional planning; assumptions are illustrative, not forecasts.",
+    },
     {
         "id": "population_growth",
         "name": "Population Growth (+10% by 2030)",
         "driver_source": "SCB",
         "target_year": 2030,
         "scope": "dalarna",
-        "driver": {"population_change": 0.10},
-        "affected_sources": ["scb", "trafikverket", "sgu", "skogsstyrelsen", "lantmateriet"],
+        "driver": _scenario_driver(population_change=0.10),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
         "description": "Baseline regional demographic growth across 15 municipalities.",
     },
     {
@@ -67,8 +125,8 @@ DEFAULT_SCENARIOS = [
         "driver_source": "SCB",
         "target_year": 2035,
         "scope": "dalarna",
-        "driver": {"population_change": 0.18},
-        "affected_sources": ["scb", "trafikverket", "lantmateriet"],
+        "driver": _scenario_driver(population_change=0.18, land_development_change=0.15),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
         "description": "Concentrated expansion in Borlänge, Falun, and regional corridors.",
     },
     {
@@ -77,11 +135,150 @@ DEFAULT_SCENARIOS = [
         "driver_source": "Trafikverket",
         "target_year": 2026,
         "scope": "dalarna",
-        "driver": {"road_temp_delta": -3.5, "freeze_cycles": 14},
-        "affected_sources": ["trafikverket", "smhi", "sgu"],
+        "driver": _scenario_driver(road_temp_delta=-3.5, freeze_cycles=14, temperature_change=-2.0),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
         "description": "Infrastructure stress and black-ice risk on high-traffic routes (E16).",
     },
+    {
+        "id": "summer_drought",
+        "name": "Summer Drought and Groundwater Stress",
+        "driver_source": "SGU",
+        "target_year": 2035,
+        "scope": "dalarna",
+        "driver": _scenario_driver(water_stress_change=0.35, temperature_change=2.5, precipitation_change_pct=-0.25),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A hotter, drier summer scenario with increased groundwater stress.",
+    },
+    {
+        "id": "heavy_precipitation",
+        "name": "Warmer Climate and Heavy Precipitation",
+        "driver_source": "SMHI",
+        "target_year": 2040,
+        "scope": "dalarna",
+        "driver": _scenario_driver(water_stress_change=0.10, temperature_change=2.0, precipitation_change_pct=0.50),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A warmer, wetter scenario that increases modeled snow/flood and environmental risk.",
+    },
+    {
+        "id": "forest_harvest_increase",
+        "name": "Increased Forest Harvest",
+        "driver_source": "Skogsstyrelsen",
+        "target_year": 2035,
+        "scope": "dalarna",
+        "driver": _scenario_driver(forest_harvest_change=0.25, land_development_change=0.05),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A higher forest-harvest intensity scenario with land and environmental effects.",
+    },
+    {
+        "id": "moderate_regional_growth",
+        "name": "Moderate Regional Growth (+6% by 2035)",
+        "driver_source": "Multiple",
+        "target_year": 2035,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.06,
+            road_temp_delta=0.8,
+            freeze_cycles=8,
+            land_development_change=0.08,
+            forest_harvest_change=0.05,
+            water_stress_change=0.05,
+            temperature_change=1.3,
+            precipitation_change_pct=0.08,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A moderate regional planning case combining population growth, development, and gradual climate pressure.",
+    },
+    {
+        "id": "urban_growth_transport",
+        "name": "Urban Growth and Transport Pressure (+15% by 2040)",
+        "driver_source": "Multiple",
+        "target_year": 2040,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.15,
+            road_temp_delta=1.2,
+            freeze_cycles=9,
+            land_development_change=0.25,
+            forest_harvest_change=0.08,
+            water_stress_change=0.10,
+            temperature_change=1.8,
+            precipitation_change_pct=0.10,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A higher-growth case with more land conversion, transport demand, and associated environmental pressure.",
+    },
+    {
+        "id": "warmer_wetter_winter",
+        "name": "Warmer, Wetter Winter with Freeze-Thaw (2040)",
+        "driver_source": "Multiple",
+        "target_year": 2040,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.04,
+            road_temp_delta=1.5,
+            freeze_cycles=14,
+            land_development_change=0.03,
+            forest_harvest_change=0.04,
+            water_stress_change=0.18,
+            temperature_change=2.0,
+            precipitation_change_pct=0.30,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A milder, wetter winter assumption with repeated freeze-thaw events and increased runoff pressure.",
+    },
+    {
+        "id": "forest_water_recovery",
+        "name": "Managed Forest and Water Recovery (2035)",
+        "driver_source": "Multiple",
+        "target_year": 2035,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.03,
+            road_temp_delta=0.5,
+            freeze_cycles=8,
+            land_development_change=-0.03,
+            forest_harvest_change=-0.15,
+            water_stress_change=-0.10,
+            temperature_change=1.0,
+            precipitation_change_pct=0.05,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "A conservation-oriented case combining reduced forest-harvest pressure and improved water stress.",
+    },
+    {
+        "id": "what_if",
+        "name": "WHAT IF - Custom scenario",
+        "driver_source": "Multiple",
+        "target_year": 2030,
+        "scope": "dalarna",
+        "driver": _scenario_driver(
+            population_change=0.10,
+            road_temp_delta=2.0,
+            land_development_change=0.15,
+            forest_harvest_change=0.20,
+            water_stress_change=-0.15,
+            temperature_change=2.0,
+        ),
+        "affected_sources": ["scb", "trafikverket", "lantmateriet", "skogsstyrelsen", "sgu", "smhi"],
+        "description": "Customize the source assumptions for this run.",
+    },
 ]
+
+
+def _scenario_driver_for_run(scenario_id: str, requested_driver: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if scenario_id == "what_if":
+        return requested_driver
+
+    default = next((scenario for scenario in DEFAULT_SCENARIOS if scenario["id"] == scenario_id), None)
+    try:
+        with db.cursor() as cur:
+            cur.execute("SELECT driver FROM scenarios WHERE id = %s", (scenario_id,))
+            row = cur.fetchone()
+        if row:
+            return {**(default["driver"] if default else {}), **(row.get("driver") or {})}
+    except Exception as exc:
+        logger.warning("Could not load fixed driver for scenario %s: %s", scenario_id, exc)
+    return default["driver"] if default else requested_driver
 
 
 def _persist_simulation_run(run_id: str, scenario_id: str, is_test: bool, input_data: dict, result: dict, model_version: str):
@@ -120,10 +317,47 @@ def list_scenarios():
             )
             rows = cur.fetchall()
             if rows:
-                return {"scenarios": rows}
+                saved = {row["id"]: row for row in rows}
+                scenarios = []
+                for default in DEFAULT_SCENARIOS:
+                    row = saved.pop(default["id"], None)
+                    if row is None:
+                        scenarios.append(default)
+                        continue
+                    merged = {**default, **row}
+                    merged["driver"] = {**default["driver"], **(row.get("driver") or {})}
+                    merged["affected_sources"] = default["affected_sources"]
+                    scenarios.append(merged)
+                scenarios.extend(saved.values())
+                return {"scenarios": scenarios}
     except Exception as exc:
         logger.warning("Could not fetch scenarios from database, using defaults: %s", exc)
     return {"scenarios": DEFAULT_SCENARIOS}
+
+
+def _set_run_metadata(result: dict[str, Any], body: RunSimulationRequest, live: dict) -> None:
+    if body.scenario == "what_if":
+        result["scenario_name"] = (body.scenario_name or "").strip() or "WHAT IF Scenario"
+    if body.initial_driver is not None:
+        result["assumptions"]["initial_driver"] = body.initial_driver
+    if body.initial_excluded_sources is not None:
+        disabled = {source for source, enabled in live.get("sources", {}).items() if enabled is False}
+        result["assumptions"]["initial_excluded_sources"] = sorted(set(body.initial_excluded_sources) | disabled)
+
+
+def _run_for_live_state(body: RunSimulationRequest, live: dict, is_test: bool) -> tuple[dict, Optional[dict[str, Any]], list[str]]:
+    driver = _scenario_driver_for_run(body.scenario, body.driver)
+    disabled = {source for source, enabled in live.get("sources", {}).items() if enabled is False}
+    excluded = sorted(set(body.excluded_sources or []) | disabled)
+    try:
+        result = run_simulation(
+            scenario=body.scenario, target_year=body.target_year, scope=body.scope,
+            driver=driver, excluded_sources=excluded, thresholds=live.get("risk_thresholds"),
+            weights=live.get("weights"), is_test=is_test,
+        )
+    except ScenarioInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return result, driver, excluded
 
 
 @router.post("/scenarios", status_code=201)
@@ -239,28 +473,21 @@ def execute_simulation(body: RunSimulationRequest, user: Optional[str] = Depends
     """Execute scenario and persist as latest official result."""
     global _LATEST_OFFICIAL
     live = control.get_live()
-    saved_th = live.get("risk_thresholds")
-    saved_weights = live.get("weights")
-    result = run_simulation(
-        scenario=body.scenario,
-        target_year=body.target_year,
-        scope=body.scope,
-        driver=body.driver,
-        excluded_sources=body.excluded_sources,
-        thresholds=saved_th,
-        weights=saved_weights,
-        is_test=False,
-    )
+    result, driver, excluded = _run_for_live_state(body, live, is_test=False)
+    _set_run_metadata(result, body, live)
     _RESULTS_CACHE[result["run_id"]] = result
     _LATEST_OFFICIAL = result
     set_latest_simulation(result)
+    input_data = body.model_dump()
+    input_data["driver"] = driver
+    input_data["excluded_sources"] = excluded
     _persist_simulation_run(
         run_id=result["run_id"],
         scenario_id=body.scenario,
         is_test=False,
-        input_data=body.model_dump(),
+        input_data=input_data,
         result=result,
-        model_version=result.get("model_version", "1.2.0"),
+        model_version=result.get("model_version", "1.4.0"),
     )
     if user:
         control.audit_action(
@@ -276,26 +503,19 @@ def execute_simulation(body: RunSimulationRequest, user: Optional[str] = Depends
 def test_simulation(body: RunSimulationRequest, user: str = Depends(auth.require_admin)):
     """Run safe test simulation: does not update the official latest result."""
     live = control.get_live()
-    saved_th = live.get("risk_thresholds")
-    saved_weights = live.get("weights")
-    result = run_simulation(
-        scenario=body.scenario,
-        target_year=body.target_year,
-        scope=body.scope,
-        driver=body.driver,
-        excluded_sources=body.excluded_sources,
-        thresholds=saved_th,
-        weights=saved_weights,
-        is_test=True,
-    )
+    result, driver, excluded = _run_for_live_state(body, live, is_test=True)
+    _set_run_metadata(result, body, live)
     _RESULTS_CACHE[result["run_id"]] = result
+    input_data = body.model_dump()
+    input_data["driver"] = driver
+    input_data["excluded_sources"] = excluded
     _persist_simulation_run(
         run_id=result["run_id"],
         scenario_id=body.scenario,
         is_test=True,
-        input_data=body.model_dump(),
+        input_data=input_data,
         result=result,
-        model_version=result.get("model_version", "1.2.0"),
+        model_version=result.get("model_version", "1.4.0"),
     )
     control.audit_action(user, "simulation.run_test", {"run_id": result["run_id"], "scenario": body.scenario, "year": body.target_year})
     logger.info("Executed safe test simulation %s by admin %s", result["run_id"], user)
@@ -355,7 +575,8 @@ def get_simulation_history(limit: int = Query(20, ge=1, le=100)):
                        result->'summary' as summary,
                        result->'target_year' as target_year,
                        result->'scope' as scope,
-                       result->'scenario' as scenario
+                       result->'scenario' as scenario,
+                       result->>'scenario_name' as scenario_name
                 FROM simulation_runs
                 ORDER BY created_at DESC
                 LIMIT %s

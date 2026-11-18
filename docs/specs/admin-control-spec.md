@@ -10,6 +10,8 @@ This document tells the developer exactly what every Admin Dashboard tab and but
 
 Core rule: the Admin/Grafana interface controls backend configuration and state. It must not directly manipulate the Main Dashboard HTML/DOM. The Main Dashboard reads the saved control state from the backend.
 
+The Admin Dashboard uses the same light red-and-white theme as the Main Dashboard; its controls and save behavior are unchanged.
+
 # 2. Target Architecture
 
 Admin UI / Grafana → FastAPI Control API → configuration/state store → TimescaleDB/PostGIS + Orion-LD → Simulation Engine → Main Dashboard (MapLibre/HTML).
@@ -129,7 +131,7 @@ Use one Scenario Editor, not six separate simulation boxes.
 | Driver Source      | Select driver such as SCB.                        |
 | Target Year        | Simulation year.                                  |
 | Scope              | All Dalarna or selected municipality.             |
-| Driver Value       | Example: population +10%.                         |
+| Driver Inputs      | Edit SCB population, road temperature, land development, forest harvest, water stress, and SMHI temperature/precipitation inputs. |
 | Affected Sources   | Show configured dependencies.                     |
 | Save Scenario      | Persist definition.                               |
 | Run Test           | Validate safely without changing official result. |
@@ -138,7 +140,7 @@ Use one Scenario Editor, not six separate simulation boxes.
 
 # Population Growth Example
 
-Example: SCB population +10% by 2030. The model should propagate consequences through configured dependency relationships, not blindly apply +10% to every source. Illustrative chain: population → traffic demand → infrastructure pressure → land development pressure → environmental pressure → water/supply exposure → overall risk. SMHI remains an environmental/external condition unless a climate scenario explicitly changes it.
+Example: SCB population +10% by 2030. The model should propagate consequences through configured dependency relationships, not blindly apply +10% to every source. The combined editor also allows direct inputs for each source, including explicit SMHI temperature and precipitation changes. Illustrative chain: population → traffic demand → infrastructure pressure → land development pressure → environmental pressure → water/supply exposure → overall risk.
 
 A transparent population calculation may use future population = current population × (1 + growth rate)^years. Coefficients must be configurable and documented.
 
@@ -146,7 +148,9 @@ A transparent population calculation may use future population = current populat
 
 POST /api/simulation/run
 
-Example request: {"scenario":"population_growth","scope":"dalarna","target_year":2030,"driver":{"population_change":0.10}}
+Example request: {"scenario":"what_if","scenario_name":"Dry summer alternative","scope":"dalarna","target_year":2035,"driver":{"population_change":0.02,"water_stress_change":0.35,"temperature_change":2.5,"precipitation_change_pct":-0.25}}
+
+`scenario_name` is a run label for WHAT IF scenarios. Preset scenario inputs can also be edited for a single run without renaming the preset.
 
 Result should include run ID, scenario, target year, scope, affected sources, municipality impacts, regional risk, assumptions and timestamp.
 

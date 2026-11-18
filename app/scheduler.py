@@ -25,10 +25,13 @@ def missing_config(auth_env_vars: list[str]) -> list[str]:
 
 
 class Scheduler:
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int | None = None) -> None:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="source")
+        self._max_workers = max_workers if max_workers is not None else config.scheduler_workers()
+        if self._max_workers > config.db_pool_max_connections():
+            raise ValueError("Scheduler workers cannot exceed POSTGRES_POOL_MAX")
+        self._pool = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="source")
         self._inflight: set[str] = set()
         self._lock = threading.Lock()
 

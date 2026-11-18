@@ -17,9 +17,10 @@ import requests
 
 import datasource_store
 from app import config, db
+from adapters.registry import get_adapter
 from connector_runner import run_connector
-from connectors import lantmateriet, scb, sgu, skogsstyrelsen, smhi, trafikverket
-from connectors.common import DALARNA_BBOX, ConnectorError, ConnectorSkipped
+from connectors import lantmateriet, scb, sgu, skogsstyrelsen, trafikverket
+from connectors.common import DALARNA_BBOX, ConnectorError, ConnectorSkipped, NormalizedRecord
 
 logger = logging.getLogger("app.jobs")
 
@@ -39,14 +40,17 @@ class JobResult:
 _ORION_LINK = '<https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"'
 
 
-def _mirror_to_orion(obs: smhi.Observation) -> None:
+def _mirror_to_orion(record: NormalizedRecord) -> None:
     """Best-effort NGSI-LD mirror (Orion-LD stays as before). Failures never fail the SMHI run."""
     base = config.orion_url()
+    entity_id = record.feature_id
+    temperature = record.attributes["air_temperature_c"]
+    lon, lat = record.lon, record.lat
     try:
         r = requests.patch(
-            f"{base}/{obs.entity_id}/attrs/temperature",
+            f"{base}/{entity_id}/attrs/temperature",
             headers={"Content-Type": "application/json", "Link": _ORION_LINK},
-            data=json.dumps({"type": "Property", "value": obs.temperature}),
+            data=json.dumps({"type": "Property", "value": temperature}),
             timeout=3,
         )
         if r.status_code == 404:
@@ -55,10 +59,10 @@ def _mirror_to_orion(obs: smhi.Observation) -> None:
                 headers={"Content-Type": "application/ld+json"},
                 data=json.dumps(
                     {
-                        "id": obs.entity_id,
+                        "id": entity_id,
                         "type": "WeatherObserved",
-                        "location": {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [obs.lon, obs.lat]}},
-                        "temperature": {"type": "Property", "value": obs.temperature, "unitCode": "CEL"},
+                        "location": {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [lon, lat]}},
+                        "temperature": {"type": "Property", "value": temperature, "unitCode": "CEL"},
                         "@context": ["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"],
                     }
                 ),
@@ -69,7 +73,13 @@ def _mirror_to_orion(obs: smhi.Observation) -> None:
 
 
 def _job_smhi() -> JobResult:
-    obs = smhi.fetch_observation()  # raises ConnectorError; nothing is written on failure
+    result = run_connector("SMHI", get_adapter("smhi").fetch_records)
+    if result.status == "skipped":
+        return JobResult("skipped", result.evidence)
+    if result.status == "error":
+        return JobResult("error", result.evidence)
+    record = result.records[0]
+    temperature = record.attributes["air_temperature_c"]
     with db.cursor() as cur:
         cur.execute(
             """
@@ -77,16 +87,18 @@ def _job_smhi() -> JobResult:
             SELECT %s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326)
             WHERE NOT EXISTS (SELECT 1 FROM regional_telemetry WHERE entity_id = %s AND time = %s)
             """,
-            (obs.observed_at, obs.entity_id, obs.temperature, obs.lon, obs.lat, obs.entity_id, obs.observed_at),
+            (record.observed_at, record.feature_id, temperature, record.lon, record.lat, record.feature_id, record.observed_at),
         )
         stored = cur.rowcount
-    _mirror_to_orion(obs)
-    return JobResult("ok", f"temperature {obs.temperature} C observed {obs.observed_at.isoformat()}", 1, stored, "live")
+    _mirror_to_orion(record)
+    return JobResult("ok", f"temperature {temperature} C observed {record.observed_at.isoformat()}", result.record_count, stored, "live")
 
 
-def _regional(name: str, module, **kwargs) -> Callable[[], JobResult]:
+def _regional(source_id: str, adapter_name: str, **kwargs) -> Callable[[], JobResult]:
+    adapter = get_adapter(source_id)
+
     def job() -> JobResult:
-        result = run_connector(name, module.fetch_records, **kwargs)
+        result = run_connector(adapter_name, adapter.fetch_records, **kwargs)
         if result.status == "skipped":
             return JobResult("skipped", result.evidence)
         if result.status == "error":
@@ -105,11 +117,11 @@ def _regional(name: str, module, **kwargs) -> Callable[[], JobResult]:
 
 CONNECTORS: dict[str, Callable[[], JobResult]] = {
     "smhi": _job_smhi,
-    "trafikverket": _regional("Trafikverket", trafikverket, bbox=DALARNA_BBOX),
-    "scb": _regional("SCB", scb),
-    "sgu": _regional("SGU", sgu, bbox=DALARNA_BBOX),
-    "skogsstyrelsen": _regional("Skogsstyrelsen", skogsstyrelsen),
-    "lantmateriet": _regional("Lantmateriet", lantmateriet, bbox=DALARNA_BBOX),
+    "trafikverket": _regional("trafikverket", "Trafikverket", bbox=DALARNA_BBOX),
+    "scb": _regional("scb", "SCB"),
+    "sgu": _regional("sgu", "SGU", bbox=DALARNA_BBOX),
+    "skogsstyrelsen": _regional("skogsstyrelsen", "Skogsstyrelsen"),
+    "lantmateriet": _regional("lantmateriet", "Lantmateriet", bbox=DALARNA_BBOX),
 }
 
 # --- execution ---------------------------------------------------------------------------
@@ -167,32 +179,14 @@ def test_source_connection(source_id: str) -> dict:
     """Test connector live API without writing to data tables."""
     started = time.time()
     try:
-        if source_id == "smhi":
-            obs = smhi.fetch_observation()
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": 1, "message": f"Connected to SMHI. Observation at Borlänge flygplats: {obs.temperature} C"}
-        elif source_id == "trafikverket":
-            recs = trafikverket.fetch_records(DALARNA_BBOX)
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": len(recs), "message": f"Connected to Trafikverket. Fetched {len(recs)} weather stations."}
-        elif source_id == "scb":
-            recs = scb.fetch_records()
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": len(recs), "message": f"Connected to SCB. Fetched {len(recs)} municipality records."}
-        elif source_id == "sgu":
-            recs = sgu.fetch_records(DALARNA_BBOX)
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": len(recs), "message": f"Connected to SGU. Fetched {len(recs)} groundwater bodies."}
-        elif source_id == "skogsstyrelsen":
-            recs = skogsstyrelsen.fetch_records()
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": len(recs), "message": f"Connected to Skogsstyrelsen. Fetched {len(recs)} forest stands."}
-        elif source_id == "lantmateriet":
-            recs = lantmateriet.fetch_records(DALARNA_BBOX)
-            dur = int((time.time() - started) * 1000)
-            return {"source": source_id, "status": "ok", "latency_ms": dur, "response_time_ms": dur, "record_count": len(recs), "message": f"Connected to Lantmateriet. Fetched {len(recs)} items."}
-        else:
-            return {"source": source_id, "status": "error", "latency_ms": 0, "response_time_ms": 0, "record_count": 0, "message": f"Unknown source '{source_id}'"}
+        adapter = get_adapter(source_id)
+        payload = adapter.test_connection()
+        dur = int((time.time() - started) * 1000)
+        payload["latency_ms"] = dur
+        payload["response_time_ms"] = dur
+        return payload
+    except KeyError:
+        return {"source": source_id, "status": "error", "latency_ms": 0, "response_time_ms": 0, "record_count": 0, "message": f"Unknown source '{source_id}'"}
     except ConnectorSkipped as exc:
         dur = int((time.time() - started) * 1000)
         return {"source": source_id, "status": "skipped", "latency_ms": dur, "response_time_ms": dur, "record_count": 0, "message": str(exc)}

@@ -875,10 +875,10 @@ function renderRisksTab() {
           <div style="flex:1;">
             <div style="display:flex; justify-content:space-between; font-size:12px; color:#cbd5e1;">
               <span>Score exceeds High threshold (&gt; <span id="lbl-val-crit">${th.high}</span> up to 1.00)</span>
-              <b style="color:#a855f7;">Emergency Protocol</b>
+              <b style="color:#a855f7;">Prototype classification</b>
             </div>
             <div style="font-size:11px; color:#8292a8; margin-top:4px;">
-              Civil contingency and regional disaster warning automatically activated.
+              This classification does not activate an official warning.
             </div>
           </div>
         </div>

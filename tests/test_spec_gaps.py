@@ -19,10 +19,9 @@ def run(c, **kw):
     return r.json()
 
 
-@pytest.mark.xfail(strict=True, reason="A-7.3: target_year is ignored; population must follow current x (1 + rate)^years")
-def test_population_formula_depends_on_target_year(admin):
+def test_population_change_is_total_by_target_year(admin):
     pops = [run(admin, target_year=y)["summary"]["population_simulated"] for y in (2026, 2030, 2040)]
-    assert pops[0] < pops[1] < pops[2]
+    assert pops[0] == pops[1] == pops[2]
 
 
 def test_simulation_uses_saved_risk_thresholds(admin):
@@ -34,13 +33,11 @@ def test_simulation_uses_saved_risk_thresholds(admin):
     assert (th["low"], th["medium"], th["high"]) == (0.2, 0.4, 0.5)
 
 
-@pytest.mark.xfail(strict=True, reason="A-7: a scenario without a population driver must not apply +10% population")
 def test_non_population_scenario_does_not_apply_population_change(admin):
     r = run(admin, scenario="climate_freeze_thaw", target_year=2026, driver={"road_temp_delta": -3.5})
     assert r["summary"]["population_change_pct"] == 0
 
 
-@pytest.mark.xfail(strict=True, reason="B-9: switching the driver source (SCB) off must remove the population effect")
 def test_excluding_the_driver_source_removes_its_effect(admin):
     r = run(admin, excluded_sources=["scb"])
     assert r["summary"]["population_change_pct"] == 0

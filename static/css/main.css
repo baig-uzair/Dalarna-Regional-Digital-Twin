@@ -474,6 +474,32 @@ header#header {
   flex-direction: column;
   gap: 6px;
 }
+.sim-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.sim-source-card {
+  min-width: 0;
+  padding: 10px;
+  background: #0b1423;
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+}
+.sim-source-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+}
+.sim-source-card .sim-form-group + .sim-form-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-subtle);
+}
 .sim-label {
   font-size: 11px;
   font-weight: 600;

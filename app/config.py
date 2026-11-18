@@ -29,8 +29,35 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = _env(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def scheduler_workers() -> int:
+    workers = _bounded_int("SCHEDULER_WORKERS", 4, 1, 32)
+    if workers > db_pool_max_connections():
+        raise ValueError("SCHEDULER_WORKERS cannot exceed POSTGRES_POOL_MAX")
+    return workers
+
+
+def db_pool_min_connections() -> int:
+    return _bounded_int("POSTGRES_POOL_MIN", 1, 1, 32)
+
+
+def db_pool_max_connections() -> int:
+    minimum = db_pool_min_connections()
+    return _bounded_int("POSTGRES_POOL_MAX", 12, minimum, 64)
+
+
 def db_params() -> dict:
-    return {
+    params = {
         "host": _env("POSTGRES_HOST", "timescaledb"),
         "port": int(_env("POSTGRES_PORT", "5432")),
         "dbname": _env("POSTGRES_DB", "dalarna_dt"),
@@ -38,6 +65,10 @@ def db_params() -> dict:
         "password": _env("POSTGRES_PASSWORD"),
         "connect_timeout": int(_env("POSTGRES_CONNECT_TIMEOUT", "1")),
     }
+    sslmode = _env("POSTGRES_SSLMODE").strip()
+    if sslmode:
+        params["sslmode"] = sslmode
+    return params
 
 
 def admin_credentials() -> tuple[str, str]:

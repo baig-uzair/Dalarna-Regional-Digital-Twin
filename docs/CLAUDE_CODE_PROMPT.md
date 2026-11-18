@@ -46,7 +46,7 @@ Grafana (:3000) ── reads the same DB, used for monitoring and time series on
 1. **The Admin panel is a custom page, not a Grafana dashboard.** Grafana panels can't do pending/apply state, POST actions, forms or a live preview. Build `/admin` with Grafana's dark look, as in the mockup. Grafana stays for monitoring: **provision** its datasource and dashboards automatically (`grafana/provisioning/...`) instead of the current manual JSON import. Link it from the admin header ("View in Grafana") and from the System tab.
 2. **Never show fake numbers or a fake "Online" status.** The mockup shows 6/6 Online, ~450,000 ha forest and 12,450 parcels. Skogsstyrelsen and Lantmäteriet have no credentials yet, and `TRAFIKVERKET_API_KEY` is still a placeholder. Each source card must honestly show one of: `Online`, `Stale` (older than its freshness rule), `Error` (with the last error), `Not configured` (credentials missing), or `Disabled`. The header shows a computed `x/6 sources online`. An SCB fallback dataset must be labelled "fallback data", not "live".
 3. **The mockup map is wrong.** It is missing **Rättvik**, and its shapes aren't geographic. Use real boundaries for all 15 municipalities. Bundle a simplified open GeoJSON at `static/data/dalarna_municipalities.geojson` (filter to län 20) and record its source and licence in the README. Codes: 2021 Vansbro, 2023 Malung-Sälen, 2026 Gagnef, 2029 Leksand, 2031 Rättvik, 2034 Orsa, 2039 Älvdalen, 2061 Smedjebacken, 2062 Mora, 2080 Falun, 2081 Borlänge, 2082 Säter, 2083 Hedemora, 2084 Avesta, 2085 Ludvika.
-4. **SMHI must not change in a population scenario.** The mockup shows "7.1 → 7.3 °C" there, which contradicts the spec. SMHI stays unchanged and is marked `External` unless the scenario is explicitly a climate scenario.
+4. **Population growth alone must not change SMHI.** The combined scenario editor may include explicit, user-entered SMHI temperature and precipitation changes; when both are zero, SMHI stays unchanged and is marked `External`.
 5. **Population driver semantics.** Slider "+10% by 2030" means **total change by the target year**: future = current × 1.10. This matches the mockup (288,000 → 316,800). Offer "annual growth rate" mode in Advanced options as an alternative: future = current × (1+r)^(target_year − base_year).
 6. **"Current (2025)" must not be hard-coded.** Derive the year from the latest real data period. Target years are 2026, 2030, 2035 and 2040.
 7. **Orion-LD** (named in the admin spec) is out of scope. Don't add it.
@@ -68,7 +68,7 @@ Disabling a source stops its scheduled ingestion only. **Never delete or modify 
 
 Put it in `simulation/engine.py`: pure Python, no I/O, unit tested.
 
-- The dependency graph and coefficients live in `config/simulation_model.json`, versioned and documented. Default chain: population (SCB) → traffic demand (Trafikverket) → infrastructure pressure; population → land development (Lantmäteriet) → environment/forest (Skogsstyrelsen); population → water exposure (SGU). SMHI is an external condition.
+- The dependency graph and coefficients live in `config/simulation_model.json`, versioned and documented. Default chain: population (SCB) → traffic demand (Trafikverket) → infrastructure pressure; population → land development (Lantmäteriet) → environment/forest (Skogsstyrelsen); population → water exposure (SGU). SMHI is external unless explicit weather inputs are supplied.
 - Use per-municipality baselines from real SCB data. Compute risk scores from 0 to 1 per category: food/supply, snow/flood, infrastructure, environment. Overall risk is a configurable weighted combination. Classify with the thresholds from control state (defaults: LOW <0.30, MEDIUM <0.60, HIGH <0.80, CRITICAL ≥0.80).
 - If a source has no data, or is toggled out of the scenario, its consequence is marked `excluded` / `no data`, not invented.
 - Every result contains: run_id, scenario, target year, scope, affected sources, per-municipality impacts, regional risk, category breakdown, assumptions, model_version, timestamp, and `"simulated": true`.
@@ -137,7 +137,7 @@ After **each** phase:
 ## 9. Tests and final verification
 
 - `tests/` with pytest:
-  - engine: dependency propagation, SMHI unchanged, excluded sources, threshold classification, total vs annual mode
+  - engine: dependency propagation, SMHI unchanged without explicit weather inputs, excluded sources, threshold classification, total vs annual mode
   - API: FastAPI TestClient, auth required on mutating endpoints, apply/version conflict, import validation
   - config schema validation
 - At the end, write `docs/ACCEPTANCE.md`. Walk through **both** acceptance checklists (main spec §22 and admin spec §19) and mark each item Pass / Fail / Not tested, with evidence (command output, endpoint response, or what you saw in the browser).

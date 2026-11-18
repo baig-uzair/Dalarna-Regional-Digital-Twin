@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dashboard-root">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -13,31 +13,20 @@
   <script src="/vendor/maplibre-gl.js"></script>
   <link rel="stylesheet" href="/css/app.css">
   <link rel="stylesheet" href="/css/main.css">
-  <link rel="stylesheet" href="/css/ui.css">
+  <link rel="stylesheet" href="/css/ui.css?v=20261118-15">
+  <link rel="stylesheet" href="/css/dashboard-theme.css?v=20261118-27">
 </head>
-<body>
+<body class="dashboard-theme">
   <div class="app" id="app">
     <nav id="nav" aria-label="Main navigation">
       <div class="brand-logo">
-        <svg viewBox="0 0 48 32" class="pine-trees-icon" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 28L12 24M12 24L6 24L12 16L8 16L12 10L10 10L12 6L14 10L12 10L16 16L12 16L18 24L12 24" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M24 28L24 22M24 22L16 22L24 13L19 13L24 5L29 13L24 13L32 22L24 22" stroke="#34d399" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M36 28L36 24M36 24L30 24L36 16L32 16L36 10L34 10L36 6L38 10L36 10L40 16L36 16L42 24L36 24" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ1NCMkyN9HUB8rnm5bAIYIBT3etDWNWX_rsuMBDZP-gWNkNkiummGV08s&amp;s=10" alt="Region Dalarna" referrerpolicy="no-referrer">
       </div>
 
       <div class="nav-links">
         <a href="#/overview" data-route="overview" class="active">
           <i class="fa-solid fa-house"></i>
           <span>Overview</span>
-        </a>
-        <a href="#/map" data-route="map">
-          <i class="fa-solid fa-map"></i>
-          <span>Map</span>
-        </a>
-        <a href="#/simulation" data-route="simulation">
-          <i class="fa-solid fa-chart-line"></i>
-          <span>Simulation</span>
         </a>
         <a href="#/municipalities" data-route="municipalities">
           <i class="fa-solid fa-city"></i>
@@ -46,10 +35,6 @@
         <a href="#/data-sources" data-route="data-sources">
           <i class="fa-solid fa-cubes"></i>
           <span>Data Sources</span>
-        </a>
-        <a href="#/insights" data-route="insights">
-          <i class="fa-solid fa-layer-group"></i>
-          <span>Insights</span>
         </a>
         <a href="#/reports" data-route="reports">
           <i class="fa-solid fa-file-lines"></i>
@@ -82,6 +67,6 @@
   </div>
 
   <div id="toasts"></div>
-  <script type="module" src="/js/main.js?v=2026101809"></script>
+  <script type="module" src="/js/dashboard.js?v=20261118-25"></script>
 </body>
 </html>

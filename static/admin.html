@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="admin-root">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,22 +11,18 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link rel="stylesheet" href="/css/app.css">
   <link rel="stylesheet" href="/css/admin.css?v=2026101805">
+  <link rel="stylesheet" href="/css/admin-theme.css?v=20261118-2">
 </head>
-<body class="grafana-theme">
+<body class="grafana-theme admin-theme">
   <!-- Top Global Bar -->
   <header class="grafana-topbar">
     <div class="topbar-left">
-      <!-- Grafana Orange Swirl Icon -->
       <div class="grafana-logo-wrap">
-        <svg viewBox="0 0 40 40" class="grafana-logo-svg">
-          <circle cx="20" cy="20" r="18" fill="#f97316"/>
-          <path d="M12 20 A8 8 0 0 1 28 20 A4 4 0 0 1 20 20" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
-          <circle cx="20" cy="20" r="2.5" fill="#ffffff"/>
-        </svg>
-        <span class="grafana-brand-name">Grafana</span>
+        <i class="fa-solid fa-location-dot admin-brand-icon" aria-hidden="true"></i>
+        <span class="grafana-brand-name">DALARNA <small>Digital Twin</small></span>
       </div>
       <div class="topbar-divider"></div>
-      <span class="topbar-app-title">Dalarna Digital Twin</span>
+      <span class="topbar-app-title">Admin Control</span>
       <span class="badge-status online ml-2"><span class="dot-online"></span> Dashboard configured</span>
     </div>
 
@@ -127,6 +123,6 @@
   </footer>
 
   <div id="toasts"></div>
-  <script type="module" src="/js/admin.js?v=2026101805"></script>
+  <script type="module" src="/js/admin.js?v=20261118-11"></script>
 </body>
 </html>

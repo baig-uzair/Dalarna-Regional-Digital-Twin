@@ -5,7 +5,7 @@ Formula: future = current * (1 + population_change)
 Propagation: Population -> Traffic demand -> Infrastructure pressure
                          -> Land development -> Forest reduction
                          -> Water exposure
-SMHI Weather remains an external condition (unaffected by population growth).
+Scenario inputs can also change the five sector sources independently.
 """
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from typing import Any, Optional
 MODEL_PATH = Path(__file__).resolve().parent.parent / "config" / "simulation_model.json"
 
 
+class ScenarioInputError(ValueError):
+    """A scenario combination produces an invalid modeled quantity."""
+
+
 def load_model_config() -> dict[str, Any]:
     if MODEL_PATH.exists():
         try:
@@ -25,7 +29,7 @@ def load_model_config() -> dict[str, Any]:
         except Exception:
             pass
     return {
-        "model_version": "1.2.0",
+        "model_version": "1.4.0",
         "default_thresholds": {"low": 0.30, "medium": 0.60, "high": 0.80, "critical": 1.00},
     }
 
@@ -59,7 +63,7 @@ def run_simulation(
 ) -> dict[str, Any]:
     """Execute dependency-based simulation scenario across Dalarna and its 15 municipalities."""
     cfg = load_model_config()
-    model_version = cfg.get("model_version", "1.2.0")
+    model_version = cfg.get("model_version", "1.4.0")
     excluded = set(excluded_sources or [])
     th = thresholds or cfg.get("default_thresholds", {"low": 0.30, "medium": 0.60, "high": 0.80, "critical": 1.00})
     w = weights or {"infrastructure": 0.30, "food": 0.25, "snow_flood": 0.25, "environment": 0.20}
@@ -70,8 +74,11 @@ def run_simulation(
     sum_w = w_infra + w_food + w_flood + w_env
     total_w = sum_w if sum_w > 0 else 1.0
 
-    driver_data = driver or {"population_change": 0.10}
-    pop_change = float(driver_data.get("population_change", 0.10))
+    driver_data = dict(driver or {})
+    default_population_change = 0.10 if scenario == "population_growth" else 0.0
+    pop_change = float(driver_data.get("population_change", default_population_change))
+    if "scb" in excluded:
+        pop_change = 0.0
 
     dep_cfg = cfg.get("dependencies", {}).get(scenario, {})
     coeffs = dep_cfg.get("coefficients", {
@@ -80,15 +87,40 @@ def run_simulation(
         "land_development": 1.0,
         "forest_reduction": -0.20,
         "water_exposure": 0.60,
-        "weather_effect": 0.0,
+        "road_temperature_risk_per_c": 0.04,
+        "freeze_cycle_risk_per_cycle": 0.003,
+        "land_development_risk": 0.10,
+        "precipitation_flood_risk": 0.20,
+        "temperature_flood_risk_per_c": 0.01,
+        "temperature_environment_risk_per_c": 0.01,
     })
 
     # 1. Cross-Source Multipliers
+    road_temp_delta = float(driver_data.get("road_temp_delta", 0.0)) if "trafikverket" not in excluded else 0.0
+    freeze_cycles = float(driver_data.get("freeze_cycles", 0.0)) if "trafikverket" not in excluded else 0.0
+    land_change = float(driver_data.get("land_development_change", 0.0)) if "lantmateriet" not in excluded else 0.0
+    forest_harvest_change = float(driver_data.get("forest_harvest_change", 0.0)) if "skogsstyrelsen" not in excluded else 0.0
+    water_stress_change = float(driver_data.get("water_stress_change", 0.0)) if "sgu" not in excluded else 0.0
+    temperature_change = float(driver_data.get("temperature_change", 0.0)) if "smhi" not in excluded else 0.0
+    precipitation_change = float(driver_data.get("precipitation_change_pct", 0.0)) if "smhi" not in excluded else 0.0
+
     traffic_pct = pop_change * coeffs.get("traffic_demand", 1.2) if "trafikverket" not in excluded else 0.0
-    land_pct = pop_change * coeffs.get("land_development", 1.0) if "lantmateriet" not in excluded else 0.0
-    forest_pct = pop_change * coeffs.get("forest_reduction", -0.20) if "skogsstyrelsen" not in excluded else 0.0
-    water_pct = pop_change * coeffs.get("water_exposure", 0.60) if "sgu" not in excluded else 0.0
-    weather_delta = 0.0  # SMHI stays unchanged as external condition
+    land_pct = (
+        pop_change * coeffs.get("land_development", 1.0) + land_change
+        if "lantmateriet" not in excluded else 0.0
+    )
+    forest_pct = (
+        pop_change * coeffs.get("forest_reduction", -0.20) - forest_harvest_change
+        if "skogsstyrelsen" not in excluded else 0.0
+    )
+    water_pct = (
+        pop_change * coeffs.get("water_exposure", 0.60) + water_stress_change
+        if "sgu" not in excluded else 0.0
+    )
+    if forest_pct < -1:
+        raise ScenarioInputError("The population and forest inputs produce a negative modeled forest area. Reduce the forest harvest or population change.")
+    if water_pct < -1:
+        raise ScenarioInputError("The population and water inputs produce a negative modeled water count. Adjust the water stress or population change.")
 
     # 2. Municipalities Calculation
     mun_baselines = cfg.get("municipalities_baseline", {})
@@ -104,16 +136,26 @@ def run_simulation(
 
         # Specific category risk scores (0..1)
         base_infra = float(m.get("base_infra_risk", 0.50))
-        infra_score = min(1.0, max(0.0, base_infra + (traffic_pct * 0.85)))
+        infra_score = min(1.0, max(0.0, base_infra
+            + (traffic_pct * coeffs.get("infrastructure_pressure", 0.85))
+            + (abs(road_temp_delta) * coeffs.get("road_temperature_risk_per_c", 0.04))
+            + (freeze_cycles * coeffs.get("freeze_cycle_risk_per_cycle", 0.003))
+            + (max(0.0, land_pct) * coeffs.get("land_development_risk", 0.10))))
         
         base_food = float(m.get("base_food_risk", 0.40))
         food_score = min(1.0, max(0.0, base_food + (pop_change * 0.30)))
 
         base_flood = float(m.get("base_flood_risk", 0.45))
-        flood_score = min(1.0, max(0.0, base_flood + (water_pct * 0.20)))
+        flood_score = min(1.0, max(0.0, base_flood
+            + (water_pct * 0.20)
+            + (precipitation_change * coeffs.get("precipitation_flood_risk", 0.20))
+            + (temperature_change * coeffs.get("temperature_flood_risk_per_c", 0.01))))
 
         base_env = float(m.get("base_env_risk", 0.35))
-        env_score = min(1.0, max(0.0, base_env + abs(forest_pct) * 0.40))
+        env_score = min(1.0, max(0.0, base_env
+            + abs(forest_pct) * 0.40
+            + max(0.0, land_pct) * 0.10
+            + (temperature_change * coeffs.get("temperature_environment_risk_per_c", 0.01))))
 
         # Overall risk: dynamically weighted combination based on control configuration
         overall_score = round((w_infra * infra_score + w_food * food_score + w_flood * flood_score + w_env * env_score) / total_w, 3)
@@ -124,16 +166,21 @@ def run_simulation(
             "current_population": base_pop,
             "simulated_population": sim_pop,
             "population_change_pct": round(pop_change * 100, 1),
-            "food_risk": {"score": round(food_score, 2), "level": classify_risk(food_score, th)},
-            "snow_flood_risk": {"score": round(flood_score, 2), "level": classify_risk(flood_score, th)},
-            "infrastructure_risk": {"score": round(infra_score, 2), "level": classify_risk(infra_score, th)},
-            "environment_risk": {"score": round(env_score, 2), "level": classify_risk(env_score, th)},
+            "food_risk": {"score": round(food_score, 2), "level": classify_risk(round(food_score, 2), th)},
+            "snow_flood_risk": {"score": round(flood_score, 2), "level": classify_risk(round(flood_score, 2), th)},
+            "infrastructure_risk": {"score": round(infra_score, 2), "level": classify_risk(round(infra_score, 2), th)},
+            "environment_risk": {"score": round(env_score, 2), "level": classify_risk(round(env_score, 2), th)},
             "overall_risk": {"score": overall_score, "level": classify_risk(overall_score, th)},
         })
 
     # Sort so top municipalities Borlänge, Falun, Mora appear first
     priority_order = ["2081", "2080", "2062", "2085", "2084"]
     mun_results.sort(key=lambda x: priority_order.index(x["code"]) if x["code"] in priority_order else 99)
+    scoped_results = [m for m in mun_results if scope == "dalarna" or m["code"] == scope]
+    if not scoped_results:
+        raise ScenarioInputError(f"No modeled municipality is available for scope '{scope}'.")
+    total_current_pop = sum(m["current_population"] for m in scoped_results)
+    total_sim_pop = sum(m["simulated_population"] for m in scoped_results)
 
     # 3. Regional Totals & Cross-Sector Impacts
     pop_pct_str = f"+{int(round(pop_change * 100))}%" if pop_change >= 0 else f"{int(round(pop_change * 100))}%"
@@ -147,7 +194,7 @@ def run_simulation(
             "id": "scb",
             "name": "Population (SCB)",
             "role": "Driver",
-            "current": "288,000",
+            "current": f"{total_current_pop:,}",
             "simulated": f"{total_sim_pop:,}",
             "change": pop_pct_str,
             "impact": "Driver",
@@ -159,9 +206,14 @@ def run_simulation(
             "role": "Infrastructure Demand",
             "current": "100 (index)",
             "simulated": f"{int(round(100 * (1 + traffic_pct)))}",
-            "change": traffic_pct_str,
+            "change": f"{traffic_pct_str}; road temp {road_temp_delta:+.1f} °C",
             "impact": "High" if traffic_pct >= 0.10 else "Medium",
             "status": "included" if "trafikverket" not in excluded else "excluded",
+            "drivers": {
+                "traffic_demand_change": traffic_pct,
+                "road_temperature_delta_c": road_temp_delta,
+                "freeze_thaw_cycles": freeze_cycles,
+            },
         },
         {
             "id": "lantmateriet",
@@ -172,6 +224,7 @@ def run_simulation(
             "change": land_pct_str,
             "impact": "High" if land_pct >= 0.10 else "Medium",
             "status": "included" if "lantmateriet" not in excluded else "excluded",
+            "drivers": {"land_development_change": land_change, "total_change": land_pct},
         },
         {
             "id": "skogsstyrelsen",
@@ -182,6 +235,7 @@ def run_simulation(
             "change": forest_pct_str,
             "impact": "Medium",
             "status": "included" if "skogsstyrelsen" not in excluded else "excluded",
+            "drivers": {"harvest_intensity_change": forest_harvest_change, "forest_area_change": forest_pct},
         },
         {
             "id": "sgu",
@@ -192,29 +246,44 @@ def run_simulation(
             "change": water_pct_str,
             "impact": "Medium",
             "status": "included" if "sgu" not in excluded else "excluded",
+            "drivers": {"water_stress_change": water_stress_change, "total_change": water_pct},
         },
         {
             "id": "smhi",
             "name": "Weather (SMHI)",
             "role": "External Condition",
-            "current": "7.1 °C",
-            "simulated": "7.1 °C",
-            "change": "+0.0 °C",
-            "impact": "External",
-            "status": "external",
+            "current": "baseline",
+            "simulated": f"{temperature_change:+.1f} °C anomaly",
+            "change": f"{temperature_change:+.1f} °C; precipitation {precipitation_change * 100:+.0f}%",
+            "impact": "External" if temperature_change == 0 and precipitation_change == 0 else "Changed",
+            "status": (
+                "excluded" if "smhi" in excluded else
+                "external" if temperature_change == 0 and precipitation_change == 0 else
+                "included"
+            ),
+            "drivers": {"temperature_change_c": temperature_change, "precipitation_change_pct": precipitation_change},
         },
     ]
 
     # Overall regional score average
-    avg_overall_score = round(sum(m["overall_risk"]["score"] for m in mun_results) / len(mun_results), 3)
+    avg_overall_score = round(sum(m["overall_risk"]["score"] for m in scoped_results) / len(scoped_results), 3)
     regional_risk_level = classify_risk(avg_overall_score, th)
 
     run_id = f"sim-{uuid.uuid4().hex[:8]}"
 
-    key_takeaway = (
-        f"A {int(round(pop_change * 100))}% population increase is expected to increase traffic demand "
-        "and land development pressure, with higher infrastructure risk and moderate environmental impacts."
-    )
+    if scoped_results:
+        baseline = sum(m["current_population"] for m in scoped_results)
+        simulated = sum(m["simulated_population"] for m in scoped_results)
+        change = simulated - baseline
+        percent = f"; {change / baseline * 100:+.2f}%" if baseline else ""
+        key_takeaway = (
+            f"The model's illustrative population baseline of {baseline:,} changes to "
+            f"{simulated:,} in the {target_year} scenario ({change:+,} people{percent}). "
+            f"{'Population source excluded. ' if 'scb' in excluded else ''}"
+            "This is a scenario calculation, not an official forecast."
+        )
+    else:
+        key_takeaway = "No modeled population is available for the selected scope."
 
     return {
         "run_id": run_id,
@@ -234,21 +303,31 @@ def run_simulation(
                 "level": regional_risk_level,
             },
             "category_risks": {
-                "food_risk": "Medium",
-                "snow_flood_risk": "Medium",
-                "infrastructure_risk": "High" if pop_change >= 0.08 else "Medium",
-                "environment_risk": "Medium",
+                key: classify_risk(
+                    round(sum(m[key]["score"] for m in scoped_results) / len(scoped_results), 3), th
+                )
+                for key in ("food_risk", "snow_flood_risk", "infrastructure_risk", "environment_risk")
             },
             "key_takeaway": key_takeaway,
         },
         "impact_by_source": impact_by_source,
         "municipalities": mun_results,
         "assumptions": {
-            "formula": "future = current * (1 + rate)",
+            "formula": "population future = base * (1 + population change); sector change = population propagation + direct source input",
             "driver": driver_data,
+            "effective_driver": {
+                "population_change": pop_change,
+                "road_temp_delta": road_temp_delta,
+                "freeze_cycles": freeze_cycles,
+                "land_development_change": land_change,
+                "forest_harvest_change": forest_harvest_change,
+                "water_stress_change": water_stress_change,
+                "temperature_change": temperature_change,
+                "precipitation_change_pct": precipitation_change,
+            },
             "coefficients": coeffs,
             "thresholds": th,
-            "note": "SMHI treated as external boundary condition. Zero database overwriting.",
+            "note": "All six source inputs are scenario estimates. Zero database overwriting.",
         },
     }
 

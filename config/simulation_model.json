@@ -1,5 +1,5 @@
 {
-  "model_version": "1.2.0",
+  "model_version": "1.4.0",
   "name": "Dalarna Cross-Sector Causal Dependency Model",
   "description": "Propagates demographic, infrastructural and environmental driver variations across Dalarna's 15 municipalities.",
   "dependencies": {
@@ -11,7 +11,12 @@
         "land_development": 1.0,
         "forest_reduction": -0.20,
         "water_exposure": 0.60,
-        "weather_effect": 0.0
+        "road_temperature_risk_per_c": 0.04,
+        "freeze_cycle_risk_per_cycle": 0.003,
+        "land_development_risk": 0.10,
+        "precipitation_flood_risk": 0.20,
+        "temperature_flood_risk_per_c": 0.01,
+        "temperature_environment_risk_per_c": 0.01
       },
       "weights": {
         "population": 0.25,

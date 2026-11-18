@@ -30,7 +30,7 @@ Result of the last run: **91 passed, 11 xfailed** (documented backend gaps). Bro
 | R-2.3 | Both | Dynamic source registry, not hard-coded in frontend | VIOLATES RULE | PARTIAL | UI renders sources from the registry: tests/e2e/test_control_room.py::test_add_seventh_source_appears_everywhere_without_code_changes | Backend has no generic connector: tests/test_spec_gaps.py::test_registered_source_can_be_refreshed (xfail) |
 | R-2.4 | Both | Secrets server-side only (JS/Grafana/git) | VIOLATES RULE | PARTIAL | Password removed from tracked files, compose reads GRAFANA_ADMIN_PASSWORD from .env: tests/test_secret_scan.py (5 tests) | Old password is still in git history (rewrite needs your approval); rotate it wherever deployed |
 | R-2.5 | Both | Live/Simulation never mix; simulated labelled; sim never overwrites live | VIOLATES RULE | PARTIAL | LIVE shows no simulated values; every simulated value carries a SIMULATED tag: tests/e2e/test_main_dashboard.py::test_mode_toggle_is_a_session_view_and_does_not_change_saved_state | Backend impact 'current' values are literals: tests/test_spec_gaps.py::test_impact_current_values_are_not_hard_coded_literals |
-| R-2.6 | Both | Dependency-based simulation; SMHI external | VIOLATES RULE | PARTIAL | Engine applies per-source coefficients and leaves SMHI unchanged (tests/test_simulation_api.py) | target_year ignored, driver exclusion ignored: tests/test_spec_gaps.py |
+| R-2.6 | Both | Dependency-based simulation; SMHI external unless scenario-driven | VIOLATES RULE | PARTIAL | Combined six-source inputs and source exclusions are applied (tests/test_simulation_api.py, tests/e2e/test_main_dashboard.py) | target_year still does not change scenario magnitudes: tests/test_spec_gaps.py |
 | R-2.7 | Both | Risk thresholds backend config, not JS | VIOLATES RULE | PARTIAL | Main Dashboard reads thresholds from the backend: tests/e2e/test_main_dashboard.py::test_main_dashboard_uses_backend_thresholds_and_components | Engine labels use config thresholds: tests/test_spec_gaps.py::test_simulation_uses_saved_risk_thresholds |
 | R-2.8 | Both | 15 municipalities, correct å/ä/ö | PARTIAL | DONE | 15 rows, UTF-8 names, diacritic-insensitive search: tests/e2e/test_main_dashboard.py::test_municipality_search_view_detail_and_back |  |
 | R-2.9 | Both | Auth + audit log | PARTIAL | PARTIAL | Admin auth on control endpoints (tests/test_control_api.py); audit written on apply/source/test/refresh | Audit log readable without login: tests/test_spec_gaps.py::test_audit_log_requires_admin; single admin role |
@@ -140,13 +140,13 @@ Result of the last run: **91 passed, 11 xfailed** (documented backend gaps). Bro
 | B-9.2 | B | Year change makes result pending | PARTIAL | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
 | B-9.3 | B | Slider + numeric synced/validated | PARTIAL | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
 | B-9.4 | B | Scope dropdown | BROKEN | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
-| B-9.5 | B | Source dependency toggles | BROKEN | PARTIAL | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run | Engine ignores excluding the driver: tests/test_spec_gaps.py::test_excluding_the_driver_source_removes_its_effect |
+| B-9.5 | B | Source dependency toggles | BROKEN | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run; tests/test_spec_gaps.py::test_excluding_the_driver_source_removes_its_effect |  |
 | B-9.6 | B | Run -> POST /api/simulation/run, all panels | VIOLATES RULE | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
 | B-9.7 | B | Reset clears pending result | PARTIAL | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
 | B-9.8 | B | Advanced options | BROKEN | DONE | tests/e2e/test_main_dashboard.py::test_simulation_control_flow_pending_year_exclusion_and_run, ::test_run_disables_button_and_shows_running_message |  |
 | B-10.1 | B | Run flow states | MISSING | DONE | tests/e2e/test_main_dashboard.py::test_run_disables_button_and_shows_running_message |  |
 | B-11.1 | B | 5 result cards clickable | VIOLATES RULE | DONE | tests/e2e/test_main_dashboard.py::test_result_cards_impact_rows_and_gauge_open_details |  |
-| B-12.1 | B | Impact by Source table traceable, rows clickable | VIOLATES RULE | PARTIAL | tests/e2e/test_main_dashboard.py::test_result_cards_impact_rows_and_gauge_open_details; SMHI row External; excluded rows struck out | 'current' values are literals: tests/test_spec_gaps.py::test_impact_current_values_are_not_hard_coded_literals |
+| B-12.1 | B | Impact by Source table traceable, rows clickable | VIOLATES RULE | PARTIAL | tests/e2e/test_main_dashboard.py::test_result_cards_impact_rows_and_gauge_open_details; six scenario inputs are reflected in source results | Several 'current' values remain literals: tests/test_spec_gaps.py::test_impact_current_values_are_not_hard_coded_literals |
 | B-13.1 | B | Gauge, label, takeaway, methodology | VIOLATES RULE | DONE | tests/e2e/test_main_dashboard.py::test_result_cards_impact_rows_and_gauge_open_details |  |
 | B-14.1 | B | Search + 'No municipality found.' | PARTIAL | DONE | tests/e2e/test_main_dashboard.py::test_municipality_search_view_detail_and_back |  |
 | B-14.2 | B | Filter dropdown | PARTIAL | DONE | tests/e2e/test_main_dashboard.py::test_municipality_search_view_detail_and_back |  |
@@ -231,7 +231,7 @@ Result of the last run: **91 passed, 11 xfailed** (documented backend gaps). Bro
 - [x] Save & Apply is the explicit commit action: same test; failures keep the draft (`test_failed_apply_keeps_draft_and_reports_the_error`)
 - [x] Turning a source OFF does not delete stored historical data: `test_disabling_a_source_keeps_history`
 - [ ] New sources can be registered without rewriting the dashboard: registration and UI are dynamic (`test_add_seventh_source_appears_everywhere_without_code_changes`) but the backend cannot fetch from a new source yet (`test_registered_source_can_be_refreshed`, xfail)
-- [ ] Simulation is dependency-based, not the same % on every source: coefficients differ per source and SMHI is unchanged, but the year and driver-exclusion are ignored (`test_spec_gaps.py`)
+- [ ] Combined simulation applies source-specific inputs and exclusions, but target-year selection does not yet change the scenario magnitudes (`test_spec_gaps.py`)
 - [x] Simulation outputs are clearly labelled as scenarios: SIMULATED tag, SIMULATION MODE banner, "not agency forecasts"
 - [x] All 15 Dalarna municipalities are supported: `test_municipality_search_view_detail_and_back`
 - [ ] Risk thresholds are configurable, not hard-coded in JavaScript: true for the UI (`test_main_dashboard_uses_backend_thresholds_and_components`); the engine still labels with its own config (`test_simulation_uses_saved_risk_thresholds`, xfail)
@@ -262,7 +262,7 @@ Result of the last run: **91 passed, 11 xfailed** (documented backend gaps). Bro
 
 ## 7. Still open (needs the backend owner or your decision)
 
-1. **Simulation engine** (`simulation/engine.py`): ignore of `target_year` (A-7.3), saved thresholds, `scb` exclusion, +10% default for non-population scenarios, hard-coded municipality baselines and impact "current" values, results held in memory only. Tests: `tests/test_spec_gaps.py`.
+1. **Simulation engine** (`simulation/engine.py`): `target_year` does not change scenario magnitudes (A-7.3), alongside hard-coded municipality baselines and several impact "current" values. Tests: `tests/test_spec_gaps.py`.
 2. **Silent fakes when the database is down** (`app/control.py`, `app/sources.py`, `app/municipalities.py`, `app/routers/control.py`).
 3. **Missing endpoints:** scenario CRUD, source configure (edit connection details), generic connector for newly registered sources.
 4. **Security:** `/api/system/audit` and `/api/system/export` are readable without login; `/api/simulation/run` is public and replaces the "official" latest result for everyone (the `PUBLIC_SIMULATION` setting is not enforced).

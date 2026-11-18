@@ -116,7 +116,9 @@ async function reloadSummary() {
 // ------------------------------------------------------------------ preview protocol
 function pushPreview() {
   const f = $("#preview-frame");
-  if (!f?.contentWindow || !A.previewReady || !A.pending) return;
+  if (!f?.contentWindow || !A.pending) return;
+  if (!A.previewReady && f.contentDocument?.readyState !== "complete") return;
+  A.previewReady = true;
   f.contentWindow.postMessage({ type: "preview-state", state: A.pending, saved: stripMeta(A.saved), result: A.previewResult || undefined, view: A.previewView || undefined }, location.origin);
 }
 window.addEventListener("message", (e) => {

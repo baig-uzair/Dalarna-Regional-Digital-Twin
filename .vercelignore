@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+.vscode
+.postman
+.pytest_cache
+__pycache__
+scratch
+tests
+docs
+postman
+grafana
+ingestor
+.env
+dalarna_database_dump.sql
+*.docx
+architecture_diagram.png

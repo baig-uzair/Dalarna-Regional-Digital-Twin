@@ -1,29 +1,63 @@
-// Main Dashboard (stakeholder view). Every number comes from the backend; nothing is hard-coded
-// except presentation (labels, icons, colours). Spec B: header, nav, source cards, map,
+// Main Dashboard (stakeholder view). Spec B: header, nav, source cards, map,
 // ONE Simulation Control, ONE Simulation Results area, municipality results, exports, UI states.
 import { get, post } from "./api.js";
-import { DalarnaMap } from "./dtmap.js";
+import { DalarnaMap } from "./dtmap.js?v=20261118-19";
 import { esc, fmtNum, fmtDateTime, relTime, toast, openDrawer, closeDrawer, openPopover, closePopover } from "./util.js";
 import * as H from "./shared.js";
 
 const PREVIEW = new URLSearchParams(location.search).get("preview") === "1";
-const ROUTES = ["overview", "map", "simulation", "municipalities", "data-sources", "insights", "reports", "settings"];
+const ROUTES = ["overview", "municipalities", "data-sources", "reports", "settings"];
 const YEARS = [2026, 2030, 2035, 2040];
 const POP_MIN = -20;
 const POP_MAX = 30;
+const WHAT_IF_SCENARIO = "what_if";
+const COMBINED_BASELINE_SCENARIO = "combined_baseline";
+const SIMULATION_ZERO_DRIVER_DEFAULTS = {
+  road_temp_delta: 0,
+  freeze_cycles: 0,
+  land_development_change: 0,
+  forest_harvest_change: 0,
+  water_stress_change: 0,
+  temperature_change: 0,
+  precipitation_change_pct: 0,
+};
+const SIMULATION_DRIVER_DEFAULTS = {
+  road_temp_delta: 2,
+  freeze_cycles: 0,
+  land_development_change: 0.15,
+  forest_harvest_change: 0.20,
+  water_stress_change: -0.15,
+  temperature_change: 2,
+  precipitation_change_pct: 0,
+};
+const SIMULATION_DRIVER_KEYS = Object.keys(SIMULATION_DRIVER_DEFAULTS);
+const SOURCE_SCENARIO_FIELDS = [
+  { id: "trafikverket", name: "Road (Trafikverket)", icon: "fa-road", fields: [
+    { key: "road_temp_delta", label: "Road temperature change", unit: "°C", min: -10, max: 10, step: 0.5, decimals: 1 },
+    { key: "freeze_cycles", label: "Freeze-thaw cycles", unit: "cycles", min: 0, max: 30, step: 1, decimals: 0, showInPanel: false },
+  ] },
+  { id: "lantmateriet", name: "Land (Lantmäteriet)", icon: "fa-map", fields: [{ key: "land_development_change", label: "New development / land-use change", unit: "%", scale: 100, min: -50, max: 100, step: 1, decimals: 0 }] },
+  { id: "skogsstyrelsen", name: "Forest (Skogsstyrelsen)", icon: "fa-tree", fields: [{ key: "forest_harvest_change", label: "Forest harvest / change intensity", unit: "%", scale: 100, min: -100, max: 200, step: 1, decimals: 0 }] },
+  { id: "sgu", name: "Water (SGU)", icon: "fa-droplet", fields: [{ key: "water_stress_change", label: "Groundwater / water-stress change", unit: "%", scale: 100, min: -100, max: 200, step: 1, decimals: 0 }] },
+  { id: "smhi", name: "Weather (SMHI)", icon: "fa-cloud-sun", fields: [
+    { key: "temperature_change", label: "Temperature change", unit: "°C", min: -10, max: 10, step: 0.5, decimals: 1 },
+    { key: "precipitation_change_pct", label: "Precipitation change", unit: "%", scale: 100, min: -100, max: 300, step: 1, decimals: 0, showInPanel: false },
+  ] },
+];
 const LAYER_IDS = ["boundaries", "population", "weather", "roads", "water", "forest", "land", "simulation_risk"];
 const LAYER_LABEL = { boundaries: "Municipality boundaries", population: "Population", weather: "Weather (SMHI)", roads: "Roads (Trafikverket)", water: "Water / Geology (SGU)", forest: "Forest (Skogsstyrelsen)", land: "Land parcels (Lantmäteriet)", simulation_risk: "Simulation risk" };
 const LAYER_COLOR = { weather: "#facc15", roads: "#60a5fa", water: "#22d3ee", forest: "#4ade80", land: "#2dd4bf" };
 // Which source drives which risk category in the model (used to show traceable contributors).
-const CAT_SOURCES = { overall_risk: ["scb", "trafikverket", "sgu", "skogsstyrelsen", "lantmateriet"], food_risk: ["scb"], snow_flood_risk: ["sgu"], infrastructure_risk: ["trafikverket"], environment_risk: ["skogsstyrelsen"] };
+const CAT_SOURCES = { overall_risk: ["scb", "trafikverket", "sgu", "skogsstyrelsen", "lantmateriet", "smhi"], food_risk: ["scb"], snow_flood_risk: ["sgu", "smhi"], infrastructure_risk: ["trafikverket", "lantmateriet"], environment_risk: ["skogsstyrelsen", "lantmateriet", "smhi"] };
 const SOURCE_COEFF = { scb: "driver", trafikverket: "traffic_demand", lantmateriet: "land_development", skogsstyrelsen: "forest_reduction", sgu: "water_exposure", smhi: "weather_effect" };
 
 const S = {
   control: null, saved: null, pending: null, summary: null, munis: null, mapState: null,
   scenarios: [], riskCfg: null, result: null, resultSig: null, me: null,
   errors: {}, loaded: false, running: false,
+  initialDriver: null, initialExcluded: null,
   view: { mode: "simulation", year: 2030 },
-  form: { scenario: "", year: 2030, pop: 10, drivers: {}, scope: "dalarna", excluded: [] },
+  form: { scenario: "", scenario_name: "", year: 2030, pop: 10, drivers: { ...SIMULATION_DRIVER_DEFAULTS }, scope: "dalarna", excluded: [] },
   invalid: {}, advancedOpen: false,
   filter: { search: "", level: "all" },
   riskView: "overall_risk",
@@ -51,24 +85,39 @@ const srcById = (id) => srcList().find((s) => s.id === id);
 const lvlOf = (entry) => (entry ? H.classify(entry.score, thresholds()) || H.lc(entry.level) : null);
 const norm = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 const stripMeta = (s) => { const { version, applied_at, applied_by, changed, unchanged, ...rest } = s || {}; return rest; };
+const formDriver = () => ({ ...Object.fromEntries(Object.entries(S.form.drivers).map(([k, v]) => [k, Number(v)])), population_change: Number(S.form.pop) / 100 });
+const disabledSources = () => Object.entries(ctl().sources || {}).filter(([, enabled]) => enabledFlag(enabled) === false).map(([id]) => id);
+const effectiveExcluded = (excluded = S.form.excluded) => [...new Set([...excluded, ...disabledSources()])].sort();
 
 function sigOfForm(f) {
-  return JSON.stringify({ s: f.scenario, y: f.year, sc: f.scope, p: Math.round(Number(f.pop) * 100) / 100, d: f.drivers, x: [...f.excluded].sort() });
+  return JSON.stringify({ s: f.scenario, n: f.scenario === WHAT_IF_SCENARIO ? f.scenario_name.trim() : "", y: f.year, sc: f.scope, p: Math.round(Number(f.pop) * 100) / 100, d: normalizedDrivers(f.drivers), x: effectiveExcluded(f.excluded) });
 }
 function sigOfResult(r) {
   const excluded = (r.impact_by_source || []).filter((i) => i.status === "excluded").map((i) => i.id).sort();
   const { population_change, ...rest } = r.assumptions?.driver || {};
-  return JSON.stringify({ s: r.scenario, y: r.target_year, sc: r.scope, p: Math.round((population_change ?? 0) * 10000) / 100, d: rest, x: excluded });
+  return JSON.stringify({ s: r.scenario, n: r.scenario === WHAT_IF_SCENARIO ? (r.scenario_name || "WHAT IF Scenario").trim() : "", y: r.target_year, sc: r.scope, p: Math.round((population_change ?? 0) * 10000) / 100, d: normalizedDrivers(rest), x: excluded });
+}
+function normalizedDrivers(drivers = {}) {
+  return Object.fromEntries([...new Set([...SIMULATION_DRIVER_KEYS, ...Object.keys(drivers || {})])].sort()
+    .map((key) => [key, Number(drivers?.[key] ?? 0)]));
 }
 const isPending = () => !!S.result && sigOfForm(S.form) !== S.resultSig;
 
 function syncFormFromResult(r) {
-  const { population_change, ...rest } = r.assumptions?.driver || {};
+  const savedDriver = r.assumptions?.driver || {};
+  const presetDriver = r.scenario === WHAT_IF_SCENARIO
+    ? savedDriver
+    : S.scenarios.find((scenario) => scenario.id === r.scenario)?.driver || savedDriver;
+  const { population_change, ...rest } = presetDriver;
   S.form = {
-    scenario: r.scenario, year: r.target_year, scope: r.scope || "dalarna",
-    pop: Math.round((population_change ?? 0) * 10000) / 100, drivers: rest,
+    scenario: r.scenario,
+    scenario_name: r.scenario === WHAT_IF_SCENARIO ? r.scenario_name || "WHAT IF Scenario" : "",
+    year: r.target_year, scope: r.scope || "dalarna",
+    pop: Math.round((population_change ?? 0) * 10000) / 100, drivers: { ...normalizedDrivers(rest), ...rest },
     excluded: (r.impact_by_source || []).filter((i) => i.status === "excluded").map((i) => i.id),
   };
+  S.initialDriver = r.assumptions?.initial_driver || formDriver();
+  S.initialExcluded = r.assumptions?.initial_excluded_sources || [...S.form.excluded];
   S.resultSig = sigOfResult(r);
 }
 
@@ -77,10 +126,16 @@ function applyScenarioDefaults(id) {
   if (!sc) return;
   const { population_change, ...rest } = sc.driver || {};
   S.form.scenario = id;
+  S.form.scenario_name = id === WHAT_IF_SCENARIO ? "WHAT IF Scenario" : "";
   if (sc.target_year) S.form.year = sc.target_year;
-  S.form.pop = population_change != null ? Math.round(population_change * 10000) / 100 : 0;
-  S.form.drivers = rest;
+  S.form.pop = population_change != null ? Math.round(population_change * 10000) / 100 : id === "population_growth" ? 10 : 0;
+  const defaults = id === WHAT_IF_SCENARIO || id === COMBINED_BASELINE_SCENARIO
+    ? SIMULATION_DRIVER_DEFAULTS
+    : SIMULATION_ZERO_DRIVER_DEFAULTS;
+  S.form.drivers = { ...defaults, ...rest };
   if (sc.scope) S.form.scope = sc.scope;
+  S.initialDriver = formDriver();
+  S.initialExcluded = [...S.form.excluded];
 }
 
 function initView() {
@@ -117,7 +172,10 @@ async function loadAll({ quiet = false } = {}) {
   ]);
   if (!S.loaded) {
     if (S.result) syncFormFromResult(S.result);
-    else if (S.scenarios[0]) applyScenarioDefaults(S.scenarios[0].id);
+    else {
+      const initialScenario = S.scenarios.find((scenario) => scenario.id === COMBINED_BASELINE_SCENARIO) || S.scenarios[0];
+      if (initialScenario) applyScenarioDefaults(initialScenario.id);
+    }
     initView();
     S.layers = { ...H.deepClone(ctl().layers || {}) };
   }
@@ -151,11 +209,7 @@ function cardState(s) {
 
 function renderKpiCards() {
   if (!comp("source_cards")) return "";
-  const cards = srcList().filter((s) => {
-    const isExplicitlyOff = ctl()?.sources?.[s.id] === false;
-    const isSavedOff = S.control?.sources?.[s.id] === false;
-    return !isExplicitlyOff && !isSavedOff && s.enabled !== false && s.status !== "disabled";
-  }).map((s) => {
+  const cards = srcList().map((s) => {
     const v = H.sourceVisual(s);
     const st = cardState(s);
     const h = headlineOf(s);
@@ -167,7 +221,7 @@ function renderKpiCards() {
           ${st.pill}
         </div>
         <div class="kpi-value">${esc(h.value)}</div>
-        <div class="kpi-sub">${esc(h.sub)}</div>
+        <div class="kpi-sub">${st.off ? "Unavailable" : esc(h.sub)}</div>
         <div class="kpi-foot">Last update: ${esc(s.last_success_at ? relTime(s.last_success_at) : "never")}</div>
       </div>`;
   });
@@ -210,7 +264,9 @@ function renderBanner() {
     parts.push(`<div class="banner preview"><b>PREVIEW</b> · ${n ? `${n} unsaved change${n > 1 ? "s" : ""} (not live until Save &amp; Apply)` : "matches the saved configuration"}${S.saved?.version ? ` · saved v${esc(S.saved.version)}` : ""}</div>`);
   }
   if (isSim()) {
-    const sc = S.scenarios.find((x) => x.id === S.form.scenario)?.name || S.form.scenario || "scenario";
+    const sc = S.form.scenario === WHAT_IF_SCENARIO
+      ? S.form.scenario_name || "WHAT IF"
+      : S.scenarios.find((x) => x.id === S.form.scenario)?.name || S.form.scenario || "scenario";
     parts.push(`<div class="banner sim"><b>SIMULATION MODE</b> · ${esc(sc)} · target year ${esc(S.view.year)} · ${esc(scopeName(S.form.scope))} <span class="banner-note">Scenario results are model-based what-if estimates, not agency forecasts.</span></div>`);
   } else {
     parts.push(`<div class="banner live"><b>LIVE</b> · measured data from connected sources. No simulated values are shown.</div>`);
@@ -305,6 +361,7 @@ function mountMap() {
     S.mapEl = host;
     try {
       S.map = new DalarnaMap(host, {
+        light: true,
         onMunicipalityClick: quickDetail,
         onMove: (info) => {
           const el = $("#map-scale");
@@ -360,8 +417,25 @@ async function quickDetail(code, lngLat) {
 
 // ------------------------------------------------------------------ simulation control (ONE editor)
 function isExternal(s) {
+  if (s.id === "smhi" && (Number(S.form.drivers.temperature_change) !== 0 || Number(S.form.drivers.precipitation_change_pct) !== 0)) return false;
   const imp = S.result?.impact_by_source?.find((i) => i.id === s.id);
-  return imp ? imp.status === "external" : /weather|climate/i.test(s.category || "");
+  return imp ? imp.status === "external" : false;
+}
+
+function renderScenarioDriver(field) {
+  const editable = S.form.scenario === WHAT_IF_SCENARIO;
+  const rawValue = S.form.drivers[field.key] ?? 0;
+  const value = Number(rawValue) * (field.scale || 1);
+  const shown = Number.isFinite(value) ? value : 0;
+  const step = field.step ?? 1;
+  const digits = field.decimals ?? 0;
+  const valueText = shown.toFixed(digits);
+  const invalid = S.invalid["d_" + field.key];
+  return `<div class="sim-form-group">
+    <div class="slider-header"><label class="sim-label" for="driver-${esc(field.key)}-number">${esc(field.label)}</label>
+      <span class="num-wrap ${invalid ? "invalid" : ""}"><input type="number" id="driver-${esc(field.key)}-number" data-sim-driver="${esc(field.key)}" data-scale="${field.scale || 1}" min="${field.min}" max="${field.max}" step="${step}" value="${esc(valueText)}" aria-invalid="${!!invalid}" ${S.running || !editable ? "disabled" : ""}><span>${esc(field.unit)}</span></span></div>
+    <input type="range" class="sim-range" id="driver-${esc(field.key)}-slider" data-sim-driver="${esc(field.key)}" data-scale="${field.scale || 1}" min="${field.min}" max="${field.max}" step="${step}" value="${Math.max(field.min, Math.min(field.max, shown))}" aria-label="${esc(field.label)} slider" ${S.running || !editable ? "disabled" : ""}>
+    ${invalid ? `<div class="field-error">${esc(invalid)}</div>` : ""}</div>`;
 }
 
 function renderControl() {
@@ -369,24 +443,34 @@ function renderControl() {
   const f = S.form;
   const sc = S.scenarios;
   const bad = (k) => (S.invalid[k] ? "invalid" : "");
-  const desc = sc.find((s) => s.id === f.scenario)?.description;
+  const isWhatIf = f.scenario === WHAT_IF_SCENARIO;
+  const desc = isWhatIf ? "Customize the source assumptions for this run." : sc.find((s) => s.id === f.scenario)?.description;
   return `
     <div class="panel sim-ctrl-card" id="sim-control">
-      <div class="card-head"><div class="card-title"><i class="fa-solid fa-gear text-blue"></i> Simulation Control</div></div>
+      <div class="card-head"><div class="card-title"><i class="fa-solid fa-gear text-blue"></i> Scenario controls</div></div>
+      <button class="btn-run-sim" id="btn-run-sim" data-act="run" ${S.running ? "disabled" : ""}>${S.running ? `<i class="fa-solid fa-spinner fa-spin"></i> Running…` : `<i class="fa-solid fa-play"></i> Run Combined Simulation`}</button>
+      <div class="run-status" id="run-status" role="status" ${S.running ? "" : "hidden"}>${S.running ? "Running simulation... Please wait." : ""}</div>
+      <div class="muted small">Adjust the scenario for all six data sources together. Inputs are what-if assumptions, not agency forecasts.</div>
       <div class="sim-form-group"><label class="sim-label" for="sim-scenario">Scenario</label>
         <select class="sim-select" id="sim-scenario" ${S.running ? "disabled" : ""}>${sc.length ? sc.map((s) => `<option value="${esc(s.id)}" ${s.id === f.scenario ? "selected" : ""}>${esc(s.name)}</option>`).join("") : `<option>${S.errors.scenarios ? "Scenarios unavailable" : "Loading…"}</option>`}</select>
         ${desc ? `<div class="muted small">${esc(desc)}</div>` : ""}</div>
+      ${!isWhatIf ? `<div class="muted small">Preset source values are fixed across all six sources. Choose WHAT IF to enter custom assumptions.</div>` : ""}
       <div class="sim-form-group"><span class="sim-label">Target year</span>
         <div class="year-pills" id="sim-year-pills" role="group" aria-label="Target year">${YEARS.map((y) => `<button class="year-pill ${f.year === y ? "active" : ""}" data-act="year" data-year="${y}" ${S.running ? "disabled" : ""}>${y}</button>`).join("")}</div></div>
-      <div class="sim-form-group"><div class="slider-header"><label class="sim-label" for="pop-number">Population change</label>
-          <span class="num-wrap ${bad("pop")}"><input type="number" id="pop-number" min="${POP_MIN}" max="${POP_MAX}" step="1" value="${esc(f.pop)}" aria-invalid="${!!S.invalid.pop}" ${S.running ? "disabled" : ""}><span>%</span></span></div>
-        <input type="range" class="sim-range" id="pop-slider" min="${POP_MIN}" max="${POP_MAX}" value="${Math.max(POP_MIN, Math.min(POP_MAX, Number(f.pop) || 0))}" step="1" aria-label="Population change slider" ${S.running ? "disabled" : ""}>
-        ${S.invalid.pop ? `<div class="field-error">${esc(S.invalid.pop)}</div>` : `<div class="muted small">Range ${POP_MIN}% to +${POP_MAX}%</div>`}</div>
-      ${Object.entries(f.drivers || {}).map(([k, v]) => `<div class="sim-form-group"><label class="sim-label" for="drv-${esc(k)}">${esc(k.replace(/_/g, " "))}</label><input type="number" step="any" id="drv-${esc(k)}" data-driver="${esc(k)}" value="${esc(v)}" class="drv-input ${bad("d_" + k)}"></div>`).join("")}
+      <div class="sim-scenario-grid">
+        <section class="sim-source-card"><div class="sim-source-title"><i class="fa-solid fa-users text-purple"></i> Population (SCB)</div>
+          <div class="sim-form-group"><div class="slider-header"><label class="sim-label" for="pop-number">Population growth rate</label>
+              <span class="num-wrap ${bad("pop")}"><input type="number" id="pop-number" min="${POP_MIN}" max="${POP_MAX}" step="1" value="${esc(f.pop)}" aria-invalid="${!!S.invalid.pop}" ${S.running || !isWhatIf ? "disabled" : ""}><span>%</span></span></div>
+            <input type="range" class="sim-range" id="pop-slider" min="${POP_MIN}" max="${POP_MAX}" value="${Math.max(POP_MIN, Math.min(POP_MAX, Number(f.pop) || 0))}" step="1" aria-label="Population change slider" ${S.running || !isWhatIf ? "disabled" : ""}>
+            ${S.invalid.pop ? `<div class="field-error">${esc(S.invalid.pop)}</div>` : `<div class="muted small">Range ${POP_MIN}% to +${POP_MAX}%. Total change by the target year; changing the year alone does not change the calculation.</div>`}</div></section>
+        ${SOURCE_SCENARIO_FIELDS.map((source) => `<section class="sim-source-card"><div class="sim-source-title"><i class="fa-solid ${source.icon}"></i> ${esc(source.name)}</div>
+          ${source.fields.filter((field) => field.showInPanel !== false).map(renderScenarioDriver).join("")}</section>`).join("")}
+      </div>
+      ${Object.entries(f.drivers || {}).filter(([key]) => !SIMULATION_DRIVER_KEYS.includes(key)).map(([key, value]) => `<div class="sim-form-group"><label class="sim-label" for="drv-${esc(key)}">${esc(key.replace(/_/g, " "))}</label><input type="number" step="any" id="drv-${esc(key)}" data-driver="${esc(key)}" value="${esc(value)}" class="drv-input ${bad("d_" + key)}" ${S.running || !isWhatIf ? "disabled" : ""}></div>`).join("")}
       <div class="sim-form-group"><label class="sim-label" for="sim-scope">Scope</label>
         <select class="sim-select" id="sim-scope" ${S.running ? "disabled" : ""}><option value="dalarna" ${f.scope === "dalarna" ? "selected" : ""}>All Dalarna (${S.munis?.municipalities?.length || 15} municipalities)</option>
           ${(S.munis?.municipalities || []).map((m) => `<option value="${esc(m.code)}" ${f.scope === m.code ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></div>
-      <div class="toggles-header">Source dependencies</div>
+      <details class="source-dependencies"><summary class="toggles-header">Source dependencies</summary>
       <div class="sim-toggles-list">${srcList().filter((s) => {
         const isOff = ctl()?.sources?.[s.id] === false || S.control?.sources?.[s.id] === false || s.enabled === false || s.status === "disabled";
         return !isOff;
@@ -395,9 +479,7 @@ function renderControl() {
         return `<label class="sim-toggle-row"><span class="toggle-name"><i class="fa-solid ${v.icon} ${v.color}"></i> ${esc(s.name)} – ${esc(s.category)}${isExternal(s) ? ` <em class="muted">(external context only)</em>` : ""}</span>
           <input type="checkbox" class="toggle-switch-input" data-act="dep" data-id="${esc(s.id)}" ${f.excluded.includes(s.id) ? "" : "checked"} ${S.running ? "disabled" : ""}><span class="toggle-switch-slider"></span></label>`;
       }).join("")}</div>
-      <div class="muted small dep-note">Switching a source off marks its consequence as “excluded”; its data stays available.</div>
-      <button class="btn-run-sim" id="btn-run-sim" data-act="run" ${S.running ? "disabled" : ""}>${S.running ? `<i class="fa-solid fa-spinner fa-spin"></i> Running…` : `<i class="fa-solid fa-play"></i> Run Simulation`}</button>
-      <div class="run-status" id="run-status" role="status">${S.running ? "Running simulation... Please wait." : ""}</div>
+      <div class="muted small dep-note">Switching a source off marks its consequence as “excluded”; its data stays available.</div></details>
       <button class="btn-reset-sim" data-act="reset" ${S.running ? "disabled" : ""}>Reset</button>
       <button class="advanced-opt-link" data-act="advanced" aria-expanded="${S.advancedOpen}">Advanced options ${S.advancedOpen ? "▴" : "▾"}</button>
       ${S.advancedOpen ? advancedHtml() : ""}
@@ -413,8 +495,8 @@ function advancedHtml() {
     <div class="adv-title">Risk thresholds (set by the administrator)</div>
     ${H.bands(thresholds()).map((b) => `<div class="adv-row"><span>${H.LEVEL_LABEL[b.level]}</span><b>${b.from.toFixed(2)} – ${b.to.toFixed(2)}</b></div>`).join("")}
     <div class="adv-title">Assumptions</div>
-    <div class="muted small">${esc(a?.formula || "Population change is applied to each municipality, then propagated through the configured source dependencies.")}</div>
-    <div class="muted small">${esc(a?.note || "SMHI weather is an external condition and is not changed by population growth.")}</div>
+    <div class="muted small">${esc(a?.formula || "Population change is applied to each municipality, then propagated with the direct source inputs.")}</div>
+    <div class="muted small">${esc(a?.note || "SMHI is treated as external context unless a temperature or precipitation scenario input is provided.")}</div>
   </div>`;
 }
 
@@ -422,7 +504,13 @@ function validateForm() {
   const errs = {};
   const p = Number(S.form.pop);
   if (S.form.pop === "" || Number.isNaN(p) || p < POP_MIN || p > POP_MAX) errs.pop = `Enter a value between ${POP_MIN} and ${POP_MAX}.`;
-  for (const [k, v] of Object.entries(S.form.drivers || {})) if (v === "" || Number.isNaN(Number(v))) errs["d_" + k] = "Enter a number.";
+  for (const [k, v] of Object.entries(S.form.drivers || {})) {
+    const n = Number(v);
+    const field = SOURCE_SCENARIO_FIELDS.flatMap((source) => source.fields).find((item) => item.key === k);
+    const scale = field?.scale || 1;
+    if (v === "" || !Number.isFinite(n)) errs["d_" + k] = "Enter a number.";
+    else if (field && (n * scale < field.min || n * scale > field.max)) errs["d_" + k] = `Enter a value between ${field.min} and ${field.max}.`;
+  }
   if (!S.form.scenario) errs.scenario = "Choose a scenario.";
   return errs;
 }
@@ -440,15 +528,18 @@ async function runSimulation() {
   renderResultsSlot();
   const payload = {
     scenario: S.form.scenario,
+    scenario_name: S.form.scenario === WHAT_IF_SCENARIO ? S.form.scenario_name.trim() || "WHAT IF Scenario" : undefined,
     target_year: S.form.year,
     scope: S.form.scope,
-    driver: { ...Object.fromEntries(Object.entries(S.form.drivers).map(([k, v]) => [k, Number(v)])), population_change: Number(S.form.pop) / 100 },
-    excluded_sources: S.form.excluded,
+    driver: formDriver(),
+    excluded_sources: effectiveExcluded(),
+    initial_driver: S.initialDriver,
+    initial_excluded_sources: S.initialExcluded == null ? null : effectiveExcluded(S.initialExcluded),
   };
   try {
     const res = await post("/api/simulation/run", payload);
     S.result = res;
-    S.resultSig = sigOfForm(S.form);
+    S.resultSig = sigOfResult(res);
     S.view = { mode: "simulation", year: res.target_year };
     H.storeSet("session", "dt_view", S.view);
     toast(`Simulation completed successfully. Result ID: ${res.run_id}`, "ok");
@@ -473,16 +564,33 @@ function rerenderControl() {
 }
 
 // ------------------------------------------------------------------ simulation results (ONE area)
-function categoryAverages() {
-  const ms = S.result?.municipalities || [];
+function scopedMunicipalities(result) {
+  return (result?.municipalities || []).filter((m) => !result.scope || result.scope === "dalarna" || m.code === result.scope);
+}
+
+function scopedPopulation(result) {
+  const municipalities = scopedMunicipalities(result);
+  if (!municipalities.length) return null;
+  const current = municipalities.reduce((sum, m) => sum + m.current_population, 0);
+  const simulated = municipalities.reduce((sum, m) => sum + m.simulated_population, 0);
+  return { population_current: current, population_simulated: simulated, population_change_pct: current ? (simulated - current) / current * 100 : 0 };
+}
+
+function impactForScope(impact) {
+  if (impact.id !== "scb") return impact;
+  const population = scopedPopulation(S.result);
+  return population ? { ...impact, current: fmtNum(population.population_current), simulated: fmtNum(population.population_simulated) } : impact;
+}
+
+function categoryAverages(result = S.result) {
+  const ms = scopedMunicipalities(result);
   const out = {};
   for (const c of H.RISK_CATS) {
-    const scores = ms.map((m) => m[c.key]?.score).filter((x) => typeof x === "number");
-    const score = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+    const scores = ms.map((m) => m[c.key]?.score);
+    const score = scores.length && scores.every(Number.isFinite)
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 1000) / 1000 : null;
     out[c.key] = { score, level: score == null ? null : H.classify(score, thresholds()) };
   }
-  const rr = S.result?.summary?.regional_risk;
-  if (rr) out.overall_risk = { score: rr.score, level: H.classify(rr.score, thresholds()) };
   return out;
 }
 
@@ -493,45 +601,103 @@ function gaugeSvg(score) {
     const [x1, y1] = pt(b.from), [x2, y2] = pt(b.to);
     return `<path d="M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 0 1 ${x2.toFixed(2)} ${y2.toFixed(2)}" fill="none" stroke="${H.LEVEL_COLOR[b.level]}" stroke-width="8" opacity=".9"/>`;
   }).join("");
-  const [nx, ny] = pt(Math.max(0, Math.min(1, score)), 27);
-  return `<svg viewBox="0 0 100 56" class="radial-gauge-svg">${arcs}<line x1="50" y1="50" x2="${nx.toFixed(2)}" y2="${ny.toFixed(2)}" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/><circle cx="50" cy="50" r="3.5" fill="#fff"/></svg>`;
+  let needle = "";
+  if (score != null) {
+    const [nx, ny] = pt(Math.max(0, Math.min(1, score)), 27);
+    needle = `<line x1="50" y1="50" x2="${nx.toFixed(2)}" y2="${ny.toFixed(2)}" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/><circle cx="50" cy="50" r="3.5" fill="#fff"/>`;
+  }
+  return `<svg viewBox="0 0 100 56" class="radial-gauge-svg">${arcs}${needle}</svg>`;
+}
+
+function formatScenarioInput(value, field) {
+  const n = Number((value * (field.scale || 1)).toPrecision(12));
+  return `${field.unit !== "cycles" && n > 0 ? "+" : ""}${n}${field.unit === "%" ? "" : " "}${field.unit}`;
+}
+
+function takeawayHtml(result) {
+  const scope = result.scope || "dalarna";
+  const municipalities = scopedMunicipalities(result);
+  const category = H.RISK_CATS.find((c) => c.key === S.riskView);
+  const { score, level } = categoryAverages(result)[category.key];
+  const outcome = score == null
+    ? `the selected ${esc(category.label.toLowerCase())} is unavailable for <b>${esc(scopeName(scope))}</b>.`
+    : `the model estimates <b>${esc(H.LEVEL_LABEL[level])} ${esc(category.label.toLowerCase())}</b> for <b>${esc(scopeName(scope))}</b> in ${esc(result.target_year)} (<b>${score.toFixed(3)} / 1</b>${scope === "dalarna" ? ", unweighted municipal average" : ""}).`;
+
+  const initial = result.assumptions?.initial_driver;
+  const driver = result.assumptions?.driver;
+  const initialExcluded = result.assumptions?.initial_excluded_sources;
+  const excluded = (result.impact_by_source || []).filter((source) => source.status === "excluded").map((source) => source.id);
+  const fields = [
+    { source: "scb", key: "population_change", label: "Population growth rate", unit: "%", scale: 100 },
+    ...SOURCE_SCENARIO_FIELDS.flatMap((source) => source.fields.map((field) => ({ ...field, source: source.id }))),
+  ];
+  const historyAvailable = initial && driver && Array.isArray(initialExcluded)
+    && fields.every((field) => Number.isFinite(initial[field.key]) && Number.isFinite(driver[field.key]));
+  const changed = historyAvailable ? fields.filter((field) => initial[field.key] !== driver[field.key]) : [];
+  const changes = changed.map((field) =>
+    `${esc(field.label.toLowerCase())} at <b>${esc(formatScenarioInput(driver[field.key], field))}</b>${excluded.includes(field.source) ? " (source excluded; not applied)" : ""}`);
+  if (historyAvailable) {
+    for (const id of new Set([...initialExcluded, ...excluded])) {
+      if (initialExcluded.includes(id) === excluded.includes(id)) continue;
+      const name = id === "scb" ? "Population (SCB)" : SOURCE_SCENARIO_FIELDS.find((source) => source.id === id)?.name || id;
+      changes.push(`${esc(name)} source ${excluded.includes(id) ? "excluded" : "included"}`);
+    }
+  }
+  const list = changes.length > 1 ? `${changes.slice(0, -1).join(", ")}${changes.length > 2 ? "," : ""} and ${changes[changes.length - 1]}` : changes[0];
+  const lead = !historyAvailable ? "Changed inputs are unavailable for this saved run; "
+    : changes.length ? `With scenario settings including ${list}, ` : "With no manually changed inputs, ";
+  let population = "";
+  const populationChanged = changed.some((field) => field.key === "population_change") && !excluded.includes("scb");
+  if (populationChanged && municipalities.length && municipalities.every((m) =>
+    Number.isFinite(m.current_population) && Number.isFinite(m.simulated_population))) {
+    const baseline = municipalities.reduce((sum, m) => sum + m.current_population, 0);
+    const simulated = municipalities.reduce((sum, m) => sum + m.simulated_population, 0);
+    const delta = simulated - baseline;
+    const signedDelta = `${delta > 0 ? "+" : delta < 0 ? "−" : ""}${fmtNum(Math.abs(delta))}`;
+    population = delta === 0
+      ? ` The model population remains at <b>${fmtNum(baseline)}</b>.`
+      : ` The model population ${delta > 0 ? "rises" : "falls"} from <b>${fmtNum(baseline)}</b> to <b>${fmtNum(simulated)}</b> (${signedDelta} people).`;
+  }
+  return `<div class="takeaway-text">${lead}${outcome}${population}</div>`;
 }
 
 function resultsInner() {
   const r = S.result;
   if (S.running && !r) return `<div class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i> Running simulation... Please wait.</div>`;
-  if (!r) return `<div class="empty-state"><b>No simulation has been run yet.</b><br>Choose the scenario, year and driver value, then click <i>Run Simulation</i>.${S.errors.result ? `<br><span class="text-red small">${esc(S.errors.result)}</span>` : ""}</div>`;
+  if (!r) return `<div class="empty-state"><b>No simulation has been run yet.</b><br>Choose a fixed preset or select WHAT IF to customize source inputs, then click <i>Run Combined Simulation</i>.${S.errors.result ? `<br><span class="text-red small">${esc(S.errors.result)}</span>` : ""}</div>`;
   if (isPending()) {
     return `<div class="pending-card"><i class="fa-solid fa-hourglass-half"></i><div><b>Pending – inputs changed</b>
       <div class="muted">The previous result (${esc(r.target_year)}, ${esc(r.run_id)}) is hidden so it cannot be mistaken for the new inputs.</div>
-      <button class="btn small primary" data-act="run" ${S.running ? "disabled" : ""}>${S.running ? "Running simulation... Please wait." : "Run Simulation"}</button></div></div>`;
+      <button class="btn small primary" data-act="run" ${S.running ? "disabled" : ""}>${S.running ? "Running simulation... Please wait." : "Run Combined Simulation"}</button></div></div>`;
   }
   const avgs = categoryAverages();
-  const total = r.summary || {};
+  const total = scopedPopulation(r);
+  const scenarioName = r.scenario_name || S.scenarios.find((s) => s.id === r.scenario)?.name || r.scenario;
   const cards = [
-    comp("population") && `<button class="m5-item" data-act="open-cat" data-cat="population"><i class="fa-solid fa-users m5-icon text-purple"></i><span class="m5-title">Population</span><div class="m5-val-row"><span class="m5-val-text">${fmtNum(total.population_simulated)}</span></div><span class="m5-sub">${simTag} ${H.fmtPct(total.population_change_pct, 0)}</span></button>`,
-    ...H.RISK_CATS.filter((c) => c.key !== "overall_risk" && comp(c.component)).map((c) => `<button class="m5-item" data-act="open-cat" data-cat="${c.key}"><i class="fa-solid ${c.icon} m5-icon"></i><span class="m5-title">${esc(c.short)} risk</span><div class="m5-val-row">${levelBadge(avgs[c.key].level)}</div><span class="m5-sub">${simTag} score ${avgs[c.key].score == null ? "—" : avgs[c.key].score.toFixed(2)}</span></button>`),
+    comp("population") && total && `<button class="m5-item" data-act="open-cat" data-cat="population"><i class="fa-solid fa-users m5-icon text-purple"></i><span class="m5-title">Population</span><div class="m5-val-row"><span class="m5-val-text">${fmtNum(total.population_simulated)}</span></div><span class="m5-sub">${simTag} ${H.fmtPct(total.population_change_pct, 0)}</span></button>`,
+    ...H.RISK_CATS.filter((c) => c.key !== "overall_risk" && comp(c.component)).map((c) => `<button class="m5-item" data-act="open-cat" data-cat="${c.key}"><i class="fa-solid ${c.icon} m5-icon"></i><span class="m5-title">${esc(c.short)} risk</span><div class="m5-val-row">${levelBadge(avgs[c.key].level)}</div><span class="m5-sub">${simTag} score ${avgs[c.key].score == null ? "—" : avgs[c.key].score.toFixed(3)}</span></button>`),
   ].filter(Boolean);
-  const impact = (r.impact_by_source || []).map((i) => {
+  const impact = (r.impact_by_source || []).map((entry) => {
+    const i = impactForScope(entry);
     const v = H.sourceVisual(srcById(i.id) || { name: i.name });
     const ex = i.status === "excluded", ext = i.status === "external";
     const cls = ext ? "external" : i.impact === "Driver" ? "none" : H.lc(i.impact);
     const badge = ex ? `<span class="risk-badge none">Excluded</span>` : `<button class="risk-badge ${cls} clickable" data-act="open-impact" data-id="${esc(i.id)}" title="Show score, threshold and contributors">${esc(i.impact)}</button>`;
     return `<tr class="${ex ? "excluded" : ""} clickable-row" data-act="open-impact" data-id="${esc(i.id)}"><td><i class="fa-solid ${v.icon} ${v.color}"></i> ${esc(i.name)}</td><td class="ro">${esc(i.current)}</td><td class="ro">${esc(i.simulated)} ${ex ? "" : simTag}</td><td class="ro ${String(i.change).startsWith("-") ? "text-red" : "text-green"}">${esc(i.change)}</td><td>${badge}</td></tr>`;
   }).join("");
-  const regional = total.regional_risk;
-  const regLvl = H.classify(regional?.score, thresholds());
+  const selectedCategory = H.RISK_CATS.find((c) => c.key === S.riskView);
+  const selectedRisk = avgs[selectedCategory.key];
   return `
-    <div class="results-meta muted small">Run <b>${esc(r.run_id)}</b> · ${esc(r.scenario)} · ${esc(r.target_year)} · ${esc(scopeName(r.scope))} · model ${esc(r.model_version)} · ${esc(fmtDateTime(r.timestamp))}${r.is_test ? " · TEST RUN" : ""}</div>
+    <div class="results-meta muted small">Run <b>${esc(r.run_id)}</b> · ${esc(scenarioName)} · ${esc(r.target_year)} · ${esc(scopeName(r.scope))} · model ${esc(r.model_version)} · ${esc(fmtDateTime(r.timestamp))}${r.is_test ? " · TEST RUN" : ""}</div>
     ${cards.length ? `<div class="metrics-5-box">${cards.join("")}</div>` : ""}
-    ${comp("simulation_results") ? `<div class="impact-table-wrap"><div class="impact-title">Impact by source (${esc(scopeName(r.scope))} total)</div>
+    ${comp("simulation_results") ? `<div class="impact-table-wrap"><div class="impact-title">Impact by source (non-population indices are regional)</div>
       <table class="impact-table"><thead><tr><th>Source</th><th>Current</th><th>Simulated (${esc(r.target_year)})</th><th>Change</th><th>Impact</th></tr></thead><tbody>${impact}</tbody></table></div>` : ""}
     ${comp("regional_risk") ? `<div class="res-split-bottom">
-      <div class="gauge-box"><div class="gauge-title">Overall Regional Risk</div>
-        <button class="gauge-btn" data-act="gauge" aria-label="Show risk breakdown">${gaugeSvg(regional?.score ?? 0)}</button>
-        <button class="gauge-label ${regLvl || ""}" data-act="gauge-label" title="Score, categories and threshold">${esc((H.LEVEL_LABEL[regLvl] || "—").toUpperCase())}</button>
-        <div class="muted small">score ${regional?.score?.toFixed?.(2) ?? "—"}</div></div>
-      <div class="takeaway-box"><div class="takeaway-head"><i class="fa-regular fa-lightbulb"></i> Key Takeaway</div><div class="takeaway-text">${esc(total.key_takeaway || "")}</div>
+      <div class="gauge-box"><div class="gauge-title">${esc(selectedCategory.label)} – ${esc(scopeName(r.scope))}</div>
+        <button class="gauge-btn" data-act="gauge" aria-label="Show ${esc(selectedCategory.label)} breakdown">${gaugeSvg(selectedRisk.score)}</button>
+        <button class="gauge-label ${selectedRisk.level || ""}" data-act="gauge-label" title="Score, contributors and threshold">${esc((H.LEVEL_LABEL[selectedRisk.level] || "—").toUpperCase())}</button>
+        <div class="muted small">score ${selectedRisk.score?.toFixed(3) ?? "—"}</div></div>
+      <div class="takeaway-box"><div class="takeaway-head"><i class="fa-regular fa-lightbulb"></i> Key Takeaway</div>${takeawayHtml(r)}
         <button class="link-btn" data-act="methodology">Methodology &amp; assumptions →</button></div></div>` : ""}`;
 }
 
@@ -542,9 +708,12 @@ function renderResults() {
       <div class="empty-state">You are viewing <b>measured data</b>. Simulated values are never shown here.<br><button class="btn small primary" data-act="mode" data-mode="simulation">Switch to Simulation</button></div></div>`;
   }
   const show = S.result && !isPending();
+  const scenarioTitle = show
+    ? S.result.scenario_name || S.scenarios.find((scenario) => scenario.id === S.result.scenario)?.name || S.result.scenario
+    : "";
   return `<div class="panel sim-res-card ${isPending() ? "is-pending" : ""}" id="results-panel">
     <div class="card-head"><div class="card-title">Simulation Results – ${esc(scopeName(show ? S.result.scope : S.form.scope))} (${esc(show ? S.result.target_year : S.form.year)}) ${show ? simTag : ""}</div>
-      ${show ? `<span class="muted small">${esc(S.scenarios.find((x) => x.id === S.result.scenario)?.name || S.result.scenario)}</span>` : ""}</div>
+      ${show ? `<span class="muted small">${esc(scenarioTitle)}</span>` : ""}</div>
     <div id="results-inner">${resultsInner()}</div></div>`;
 }
 
@@ -643,7 +812,7 @@ function openMunicipality(code) {
     body += `<div class="drawer-badges">${levelBadge(lvlOf(r.overall_risk), `Overall: ${H.LEVEL_LABEL[lvlOf(r.overall_risk)]}`)} ${simTag}</div>
       <dl class="drawer-dl"><dt>Current population</dt><dd><b>${fmtNum(r.current_population)}</b></dd>
       <dt>Simulated (${esc(S.result.target_year)})</dt><dd><b class="text-green">${fmtNum(r.simulated_population)}</b> (${H.fmtPct(r.population_change_pct, 0)}) ${simTag}</dd>
-      ${H.RISK_CATS.map((c) => `<dt>${esc(c.label)}</dt><dd>${levelButton(lvlOf(r[c.key]), `data-act="open-risk" data-code="${esc(code)}" data-cat="${c.key}"`)} <span class="muted">score ${r[c.key].score.toFixed(2)}</span></dd>`).join("")}</dl>
+      ${H.RISK_CATS.map((c) => `<dt>${esc(c.label)}</dt><dd>${levelButton(lvlOf(r[c.key]), `data-act="open-risk" data-code="${esc(code)}" data-cat="${c.key}"`)} <span class="muted">score ${r[c.key].score.toFixed(3)}</span></dd>`).join("")}</dl>
       <div class="adv-title">Contributing sources</div>${contributorsHtml("overall_risk")}
       <div class="adv-title">Trend</div><div class="trend-box">${trendSvg({ code, cur: r.current_population, sim: r.simulated_population })}<span class="muted small">${esc(S.munis?.data_year || "now")}: ${fmtNum(r.current_population)} → ${esc(S.result.target_year)}: ${fmtNum(r.simulated_population)} ${simTag}</span></div>
       <div class="adv-title">Assumptions</div><div class="muted small">Driver: ${esc(JSON.stringify(S.result.assumptions?.driver || {}))} · model ${esc(S.result.model_version)} · run ${esc(S.result.run_id)}</div>`;
@@ -663,31 +832,33 @@ function openRiskDetail(code, catKey) {
   const cat = H.RISK_CATS.find((c) => c.key === catKey);
   const band = H.bands(thresholds()).find((b) => b.level === lvl);
   openDrawer(`<h2>${esc(r.name)} – ${esc(cat.label)}</h2><div class="drawer-badges">${levelBadge(lvl)} ${simTag}</div>
-    <dl class="drawer-dl"><dt>Score</dt><dd><b>${e.score.toFixed(2)}</b> (0–1)</dd><dt>Threshold band</dt><dd>${band ? `${band.from.toFixed(2)} – ${band.to.toFixed(2)}` : "—"} (${H.LEVEL_LABEL[lvl]})</dd></dl>
+    <dl class="drawer-dl"><dt>Score</dt><dd><b>${e.score.toFixed(3)}</b> (0–1)</dd><dt>Threshold band</dt><dd>${band ? `${band.from.toFixed(2)} – ${band.to.toFixed(2)}` : "—"} (${H.LEVEL_LABEL[lvl]})</dd></dl>
     <div class="adv-title">Main contributors</div>${contributorsHtml(catKey)}
     <div class="muted small">Thresholds are configured by the administrator, not by this page.</div>`);
 }
 
 function openCategory(catKey) {
   if (catKey === "population") {
-    const t = S.result.summary;
+    const t = scopedPopulation(S.result);
+    if (!t) return openDrawer(`<h2>Population</h2><p>No modeled population is available for this scope.</p>`);
     return openDrawer(`<h2>Population</h2><div class="drawer-badges">${simTag}</div><dl class="drawer-dl"><dt>Current</dt><dd>${fmtNum(t.population_current)}</dd><dt>Simulated (${esc(S.result.target_year)})</dt><dd><b>${fmtNum(t.population_simulated)}</b> (${H.fmtPct(t.population_change_pct, 0)})</dd></dl>
       <div class="adv-title">Driver</div><div class="muted small">${esc(JSON.stringify(S.result.assumptions?.driver || {}))}. Formula: ${esc(S.result.assumptions?.formula || "")}</div>`);
   }
   const cat = H.RISK_CATS.find((c) => c.key === catKey);
-  const top = [...(S.result.municipalities || [])].sort((a, b) => b[catKey].score - a[catKey].score).slice(0, 5);
+  const top = scopedMunicipalities(S.result).filter((m) => Number.isFinite(m[catKey]?.score)).sort((a, b) => b[catKey].score - a[catKey].score).slice(0, 5);
   const avg = categoryAverages()[catKey];
   openDrawer(`<h2>${esc(cat.label)}</h2><div class="drawer-badges">${levelBadge(avg.level)} ${simTag}</div>
-    <dl class="drawer-dl"><dt>Regional average score</dt><dd><b>${avg.score?.toFixed(2)}</b></dd></dl>
+    <dl class="drawer-dl"><dt>${S.result.scope === "dalarna" ? "Regional average" : esc(scopeName(S.result.scope))} score</dt><dd><b>${avg.score?.toFixed(3) ?? "—"}</b></dd></dl>
     <div class="adv-title">Contributing factors</div>${contributorsHtml(catKey)}
-    <div class="adv-title">Highest municipalities</div>${top.map((m) => `<div class="adv-row"><span>${esc(m.name)}</span>${levelButton(lvlOf(m[catKey]), `data-act="open-risk" data-code="${esc(m.code)}" data-cat="${catKey}"`, `${H.LEVEL_LABEL[lvlOf(m[catKey])]} · ${m[catKey].score.toFixed(2)}`)}</div>`).join("")}`);
+    <div class="adv-title">Highest municipalities</div>${top.map((m) => `<div class="adv-row"><span>${esc(m.name)}</span>${levelButton(lvlOf(m[catKey]), `data-act="open-risk" data-code="${esc(m.code)}" data-cat="${catKey}"`, `${H.LEVEL_LABEL[lvlOf(m[catKey])]} · ${m[catKey].score.toFixed(3)}`)}</div>`).join("")}`);
 }
 
 function openImpact(id) {
-  const i = S.result?.impact_by_source?.find((x) => x.id === id);
-  if (!i) return;
+  const entry = S.result?.impact_by_source?.find((x) => x.id === id);
+  if (!entry) return;
+  const i = impactForScope(entry);
   const c = S.result.assumptions?.coefficients?.[SOURCE_COEFF[id]];
-  const kind = i.status === "external" ? "External condition: this source is context only and is not changed by the scenario." : i.status === "excluded" ? "Excluded by the Source dependency toggles. Its data stays available; only the consequence is left out." : i.impact === "Driver" ? "Driver: the scenario input that starts the dependency chain." : "Causal: changed through the configured dependency chain.";
+  const kind = i.status === "external" ? "External condition: this source is context only and is not changed by the scenario." : i.status === "excluded" ? "Excluded by the Source dependency toggles. Its data stays available; only the consequence is left out." : i.impact === "Driver" ? "Driver: the scenario input that starts the dependency chain." : "Scenario inputs and configured dependencies change this source's modeled consequence.";
   const feeds = Object.entries(CAT_SOURCES).filter(([k, ids]) => k !== "overall_risk" && ids.includes(id)).map(([k]) => `<div class="adv-row"><span>${esc(H.RISK_CATS.find((c2) => c2.key === k).label)}</span></div>`).join("");
   openDrawer(`<h2>${esc(i.name)}</h2><div class="drawer-badges"><span class="risk-badge ${i.status === "external" ? "external" : H.lc(i.impact) || "none"}">${esc(i.status === "excluded" ? "Excluded" : i.impact)}</span> ${simTag}</div>
     <p class="muted">${esc(kind)}</p>
@@ -698,23 +869,44 @@ function openImpact(id) {
 
 function openGauge() {
   const avgs = categoryAverages();
-  const rr = S.result.summary.regional_risk;
-  const lvl = H.classify(rr.score, thresholds());
+  const category = H.RISK_CATS.find((c) => c.key === S.riskView);
+  const selectedRisk = avgs[category.key];
+  const lvl = selectedRisk.level;
   const th = H.bands(thresholds());
   const band = th.find((b) => b.level === lvl);
-  openDrawer(`<h2>Overall Regional Risk</h2><div class="drawer-badges">${levelBadge(lvl)} ${simTag}</div>
-    <dl class="drawer-dl"><dt>Score</dt><dd><b>${rr.score.toFixed(3)}</b></dd><dt>Band</dt><dd>${band ? `${band.from.toFixed(2)} – ${band.to.toFixed(2)}` : "—"}</dd></dl>
-    <div class="adv-title">Category contributions</div>${H.RISK_CATS.filter((c) => c.key !== "overall_risk").map((c) => `<div class="adv-row"><span>${esc(c.label)}</span><b>${avgs[c.key].score?.toFixed(2)} · ${H.LEVEL_LABEL[avgs[c.key].level]}</b></div>`).join("")}
+  const contributions = category.key === "overall_risk"
+    ? `<div class="adv-title">Category contributions</div>${H.RISK_CATS.filter((c) => c.key !== "overall_risk").map((c) => `<div class="adv-row"><span>${esc(c.label)}</span><b>${avgs[c.key].score?.toFixed(3) ?? "—"} · ${H.LEVEL_LABEL[avgs[c.key].level] || "—"}</b></div>`).join("")}`
+    : `<div class="adv-title">Contributing factors</div>${contributorsHtml(category.key)}`;
+  openDrawer(`<h2>${esc(category.label)} – ${esc(scopeName(S.result.scope))}</h2><div class="drawer-badges">${levelBadge(lvl)} ${simTag}</div>
+    <dl class="drawer-dl"><dt>Score</dt><dd><b>${selectedRisk.score?.toFixed(3) ?? "—"}</b></dd><dt>Band</dt><dd>${band ? `${band.from.toFixed(2)} – ${band.to.toFixed(2)}` : "—"}</dd></dl>
+    ${contributions}
     <div class="adv-title">Thresholds</div>${th.map((b) => `<div class="adv-row"><span>${H.LEVEL_LABEL[b.level]}</span><b>${b.from.toFixed(2)} – ${b.to.toFixed(2)}</b></div>`).join("")}
     <div class="drawer-actions"><button class="btn" data-act="methodology">Methodology</button></div>`);
 }
 
 function openMethodology() {
   const r = S.result;
-  openDrawer(`<h2>Methodology &amp; assumptions</h2><p class="muted">Scenario results are produced by the Dalarna dependency model: population → traffic demand → infrastructure pressure → land development → environmental pressure → water/supply exposure → overall risk. They are what-if estimates, not agency forecasts.</p>
-    <dl class="drawer-dl"><dt>Model version</dt><dd>${esc(r?.model_version || "—")}</dd><dt>Formula</dt><dd>${esc(r?.assumptions?.formula || "—")}</dd><dt>Driver</dt><dd>${esc(JSON.stringify(r?.assumptions?.driver || {}))}</dd></dl>
+  const driver = r?.assumptions?.driver || {};
+  const fields = [
+    { source: "scb", key: "population_change", label: "Population change (total)", unit: "%", scale: 100 },
+    ...SOURCE_SCENARIO_FIELDS.flatMap((source) => source.fields.map((field) => ({ ...field, source: source.id }))),
+  ];
+  const excluded = new Set((r?.impact_by_source || []).filter((item) => item.status === "excluded").map((item) => item.id));
+  const knownKeys = new Set(fields.map((field) => field.key));
+  const inputs = [
+    ...fields.filter((field) => Object.prototype.hasOwnProperty.call(driver, field.key)).map((field) => {
+      const value = driver[field.key];
+      return `<div class="adv-row"><span>${esc(field.label)}${excluded.has(field.source) ? ' <span class="muted">(excluded)</span>' : ""}</span><b>${esc(Number.isFinite(value) ? formatScenarioInput(value, field) : value)}</b></div>`;
+    }),
+    ...Object.entries(driver).filter(([key]) => !knownKeys.has(key))
+      .map(([key, value]) => `<div class="adv-row"><span>${esc(key.replace(/_/g, " "))}</span><b>${esc(value)}</b></div>`),
+  ].join("");
+  openDrawer(`<div class="methodology-panel"><h2>Methodology &amp; assumptions</h2><p class="muted">Scenario results are produced by the Dalarna dependency model: population → traffic demand → infrastructure pressure → land development → environmental pressure → water/supply exposure → overall risk. They are what-if estimates, not agency forecasts.</p>
+    <div class="adv-row"><span>Model version</span><b>${esc(r?.model_version || "—")}</b></div>
+    <div class="adv-title">Formula</div><p class="methodology-formula">${esc(r?.assumptions?.formula || "—")}</p>
+    <div class="adv-title">Scenario inputs</div><p class="muted small">Configured values; excluded sources are not applied.</p>${inputs || `<p class="muted small">No scenario inputs available.</p>`}
     <div class="adv-title">Coefficients</div>${Object.entries(r?.assumptions?.coefficients || {}).map(([k, v]) => `<div class="adv-row"><span>${esc(k.replace(/_/g, " "))}</span><b>${esc(v)}</b></div>`).join("")}
-    <p class="muted small">${esc(r?.assumptions?.note || "SMHI weather is an external condition; population growth does not change it.")}</p>`);
+    <p class="muted small">${esc(r?.assumptions?.note || "SMHI weather is an external condition; population growth does not change it.")}</p></div>`);
 }
 
 async function openSource(id) {
@@ -818,8 +1010,7 @@ function layoutOverview() {
       ${comp("map") ? mapPanelHtml() : ""}
       ${showCtl ? `<div id="control-slot">${renderControl()}</div>` : ""}
       ${showRes ? `<div id="results-slot">${renderResults()}</div>` : ""}
-    </section>
-    <div id="muni-slot">${renderMuni()}</div>`;
+    </section>`;
 }
 
 function pageDataSources() {
@@ -830,19 +1021,6 @@ function pageDataSources() {
   return `<section class="panel"><div class="card-head"><div class="card-title">Data Sources</div><button class="btn small" data-act="refresh"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
     <div class="muted small" style="margin-bottom:8px">Read-only overview. Sources are switched on or off by the administrator in the Control Room.</div>
     <div class="muni-table-scroll"><table class="muni-full-table"><thead><tr><th>Source</th><th>Category</th><th>Status</th><th>Latest</th><th>Last update</th><th>Interval</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="empty-row">${S.errors.summary ? "Unable to retrieve this source. Showing last available data." : "Loading…"}</td></tr>`}</tbody></table></div></section>${renderKpiCards()}`;
-}
-
-function pageInsights() {
-  if (!S.result || !isSim()) return `<section class="panel"><div class="card-head"><div class="card-title">Insights</div></div><div class="empty-state">Insights summarise a simulation result.<br>${isSim() ? "Run a simulation first." : `<button class="btn small primary" data-act="mode" data-mode="simulation">Switch to Simulation</button>`}</div></section>`;
-  if (isPending()) return `<section class="panel"><div class="card-head"><div class="card-title">Insights</div></div>${resultsInner()}</section>`;
-  const top = [...S.result.municipalities].sort((a, b) => b.overall_risk.score - a.overall_risk.score).slice(0, 5);
-  const avgs = categoryAverages();
-  const movers = (S.result.impact_by_source || []).filter((i) => i.status === "included" && i.id !== "scb");
-  return `<section class="panel"><div class="card-head"><div class="card-title">Insights ${simTag}</div></div>
-    <p class="takeaway-text">${esc(S.result.summary.key_takeaway)}</p>
-    <div class="insight-grid"><div><div class="adv-title">Highest overall risk</div>${top.map((m) => `<div class="adv-row"><span>${esc(m.name)}</span>${levelButton(lvlOf(m.overall_risk), `data-act="open-risk" data-code="${esc(m.code)}" data-cat="overall_risk"`, `${H.LEVEL_LABEL[lvlOf(m.overall_risk)]} · ${m.overall_risk.score.toFixed(2)}`)}</div>`).join("")}</div>
-    <div><div class="adv-title">Regional category risk</div>${H.RISK_CATS.map((c) => `<div class="adv-row"><span>${esc(c.label)}</span>${levelBadge(avgs[c.key].level)}</div>`).join("")}</div>
-    <div><div class="adv-title">Largest cross-source effects</div>${movers.map((i) => `<div class="adv-row"><span>${esc(i.name)}</span><b>${esc(i.change)}</b></div>`).join("")}</div></div></section>`;
 }
 
 function pageReports() {
@@ -876,11 +1054,8 @@ function render() {
   if (w) w.textContent = `${S.munis?.municipalities?.length || 15} municipalities${S.summary ? ` · ${S.summary.online_count}/${S.summary.total} sources online` : ""}`;
   closePopover();
   if (r === "overview") view.innerHTML = layoutOverview();
-  else if (r === "map") view.innerHTML = mapPanelHtml(true);
-  else if (r === "simulation") view.innerHTML = `<section class="mid-row-grid cols-2"><div id="control-slot">${renderControl()}</div><div id="results-slot">${renderResults()}</div></section><div id="muni-slot">${renderMuni()}</div>`;
-  else if (r === "municipalities") view.innerHTML = `<div id="muni-slot">${renderMuni()}</div>`;
+  else if (r === "municipalities") view.innerHTML = `<div id="muni-slot">${renderMuni() || `<section class="panel empty-state">Municipality results are hidden by the administrator.</section>`}</div>`;
   else if (r === "data-sources") view.innerHTML = pageDataSources();
-  else if (r === "insights") view.innerHTML = pageInsights();
   else if (r === "reports") view.innerHTML = pageReports();
   else if (r === "settings") view.innerHTML = pageSettings();
   if ($("#map-slot")) mountMap();
@@ -913,7 +1088,11 @@ document.addEventListener("click", async (e) => {
     markPending(); renderHeader();
   } else if (a === "run") runSimulation();
   else if (a === "reset") {
-    if (S.result) syncFormFromResult(S.result); else if (S.scenarios[0]) applyScenarioDefaults(S.scenarios[0].id);
+    if (S.result) syncFormFromResult(S.result);
+    else {
+      const currentScenario = S.scenarios.find((scenario) => scenario.id === S.form.scenario) || S.scenarios[0];
+      if (currentScenario) applyScenarioDefaults(currentScenario.id);
+    }
     S.invalid = {};
     rerenderControl(); markPending(); renderHeader();
     toast("Simulation inputs reset. No data was deleted.", "ok");
@@ -952,7 +1131,7 @@ document.addEventListener("change", (e) => {
     S.layers[t.dataset.layer] = t.checked;
     refreshMap();
   } else if (t.matches("#map-risk-select")) {
-    S.riskView = t.value; refreshMap();
+    S.riskView = t.value; refreshMap(); renderResultsSlot();
   } else if (t.matches("#muni-filter")) { S.filter.level = t.value; renderMuniSlot(); }
   else if (t.matches("#pref-mode")) { S.prefs.defaultMode = t.value || undefined; H.storeSet("local", "dt_prefs", S.prefs); toast("Personal setting saved.", "ok"); }
   else if (t.matches("#pref-compact")) { S.prefs.compact = t.checked; H.storeSet("local", "dt_prefs", S.prefs); document.body.classList.toggle("compact", t.checked); }
@@ -961,8 +1140,10 @@ document.addEventListener("change", (e) => {
 function clearInvalid(k) {
   if (!S.invalid[k]) return;
   delete S.invalid[k];
-  $(".num-wrap")?.classList.remove("invalid");
-  document.querySelector(".field-error")?.remove();
+  const input = k === "pop" ? $("#pop-number") : $(`#driver-${k.slice(2)}-number`);
+  input?.closest(".num-wrap")?.classList.remove("invalid");
+  input?.setAttribute("aria-invalid", "false");
+  input?.closest(".sim-form-group")?.querySelector(".field-error")?.remove();
 }
 
 document.addEventListener("input", (e) => {
@@ -979,6 +1160,15 @@ document.addEventListener("input", (e) => {
     markPending();
   } else if (t.matches(".drv-input")) {
     S.form.drivers[t.dataset.driver] = t.value === "" ? "" : Number(t.value);
+    markPending();
+  } else if (t.matches("[data-sim-driver]")) {
+    const key = t.dataset.simDriver;
+    const scale = Number(t.dataset.scale) || 1;
+    const field = SOURCE_SCENARIO_FIELDS.flatMap((source) => source.fields).find((item) => item.key === key);
+    S.form.drivers[key] = t.value === "" ? "" : Number(t.value) / scale;
+    const partner = $(t.type === "range" ? `#driver-${key}-number` : `#driver-${key}-slider`);
+    if (partner && t.value !== "") partner.value = t.value;
+    if (field && t.value !== "") clearInvalid("d_" + key);
     markPending();
   } else if (t.matches("#muni-search")) {
     S.filter.search = t.value;

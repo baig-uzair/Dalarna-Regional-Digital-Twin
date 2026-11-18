@@ -43,7 +43,7 @@ services:
       - POSTGRES_HOST=timescaledb
       - ORION_URL=http://orion:1026/ngsi-ld/v1/entities
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - .:/app    # <-- Les modifs du code et de static/ sont visibles (redémarrer pour le code Python)
     depends_on:

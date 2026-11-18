@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable, Optional
 
 from connectors.common import ConnectorError, ConnectorSkipped, NormalizedRecord
@@ -29,10 +30,23 @@ class RunResult:
 
 def _validate(records: list[NormalizedRecord], name: str) -> None:
     for r in records:
+        if not isinstance(r, NormalizedRecord):
+            raise ConnectorError(f"{name}: connector returned a non-normalized record")
         if not r.source_id or not r.dataset_id:
             raise ConnectorError(f"{name}: record missing required source_id/dataset_id")
-        if r.attributes is None:
-            raise ConnectorError(f"{name}: record missing required attributes")
+        if not isinstance(r.attributes, dict):
+            raise ConnectorError(f"{name}: record attributes must be an object")
+        for field_name in ("fetched_at", "observed_at"):
+            value = getattr(r, field_name)
+            if value is not None and (not isinstance(value, datetime) or value.utcoffset() is None):
+                raise ConnectorError(f"{name}: {field_name} must be timezone-aware")
+        if (r.lon is None) != (r.lat is None):
+            raise ConnectorError(f"{name}: longitude and latitude must be provided together")
+        if r.lon is not None:
+            if not isinstance(r.lon, (int, float)) or not isinstance(r.lat, (int, float)):
+                raise ConnectorError(f"{name}: coordinates must be numeric")
+            if not -180 <= r.lon <= 180 or not -90 <= r.lat <= 90:
+                raise ConnectorError(f"{name}: coordinates must be valid WGS84 longitude/latitude")
 
 
 def run_connector(name: str, fetch_fn: Callable[..., list[NormalizedRecord]], *args, **kwargs) -> RunResult:
